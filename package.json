@@ -4,13 +4,15 @@
   "private": true,
   "type": "module",
   "bin": {
-    "claude-agent-bridge": "dist/cli.js"
+    "claude-agent-bridge": "dist/src/cli.js",
+    "claude-agent-bridge-mcp": "dist/src/mcpServer.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bridge": "npm run build && node dist/src/cli.js"
+    "bridge": "npm run build && node dist/src/cli.js",
+    "mcp": "npm run build && node dist/src/mcpServer.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
