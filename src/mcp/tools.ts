@@ -21,7 +21,10 @@ export async function runClaudeStageTool(
   if (validationError) return errorResult(validationError);
 
   try {
-    const agent = new ClaudeCodeAgent(options);
+    const agent = new ClaudeCodeAgent({
+      claudePath: process.env.CLAUDE_CODE_PATH,
+      ...options
+    });
     const result = await agent.run({
       stage: args.stage,
       agent: "claude",

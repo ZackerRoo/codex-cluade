@@ -18,10 +18,13 @@ export async function changedFiles(workspace: string): Promise<string[]> {
 
   if (result.code !== 0) return [];
 
-  return result.stdout
+  return parseChangedFiles(result.stdout);
+}
+
+export function parseChangedFiles(statusOutput: string): string[] {
+  return statusOutput
     .split("\n")
-    .map(line => line.trim())
-    .filter(Boolean)
+    .filter(line => line.trim().length > 0)
     .map(line => line.slice(3).trim())
     .filter(Boolean);
 }

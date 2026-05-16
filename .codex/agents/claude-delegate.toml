@@ -22,7 +22,11 @@ Do not perform the delegated work yourself. Do not edit files directly. Do not r
 command = "node"
 args = ["dist/src/mcpServer.js"]
 cwd = "/Users/luozhenkun/Desktop/codex-claude/.worktrees/claude-code-agent-bridge"
+env_vars = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 startup_timeout_sec = 20
 tool_timeout_sec = 1800
 enabled = true
 enabled_tools = ["claude_run_stage"]
+
+[mcp_servers.claude-agent-bridge.env]
+CLAUDE_CODE_PATH = "/Users/luozhenkun/.local/bin/claude"
