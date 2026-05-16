@@ -1,0 +1,19 @@
+{
+  "name": "codex-claude-agent-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "claude-agent-bridge": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bridge": "npm run build && node dist/src/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
