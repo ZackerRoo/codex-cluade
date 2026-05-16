@@ -35,7 +35,7 @@ export class ClaudeCodeAgent implements AgentProvider {
     const prompt = buildStagePrompt({ ...input, runId });
     await store.writeStageInput(runId, input.stage, prompt);
     const logPath = await store.writeLog(runId, `claude-${input.stage}.log`, "");
-    const permissionMode = input.stage === "implement" ? "acceptEdits" : "plan";
+    const permissionMode = input.stage === "implement" ? "acceptEdits" : "default";
     const args = [
       "-p",
       "--output-format",
@@ -45,14 +45,17 @@ export class ClaudeCodeAgent implements AgentProvider {
       "--debug-file",
       logPath
     ];
+    if (input.stage !== "implement") {
+      args.push("--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
+    }
 
     if (input.model) args.push("--model", input.model);
     if (input.effort) args.push("--effort", input.effort);
-    args.push(prompt);
 
     const result = await this.exec(this.claudePath, args, {
       cwd: input.workspace,
-      timeoutMs: input.timeoutMs ?? 15 * 60 * 1000
+      timeoutMs: input.timeoutMs ?? 15 * 60 * 1000,
+      input: prompt
     });
 
     const outputText = extractClaudeOutput(result.stdout);
