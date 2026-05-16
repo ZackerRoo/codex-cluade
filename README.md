@@ -12,6 +12,18 @@ npm run build
 codex mcp add claude-agent-bridge -- node "$PWD/dist/src/mcpServer.js"
 ```
 
+Claude Code CLI authentication must be visible to the MCP server process. For this machine, keep these environment variable names available to Codex:
+
+```toml
+[mcp_servers.claude-agent-bridge]
+command = "node"
+args = ["/absolute/path/to/dist/src/mcpServer.js"]
+env_vars = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+
+[mcp_servers.claude-agent-bridge.env]
+CLAUDE_CODE_PATH = "/Users/luozhenkun/.local/bin/claude"
+```
+
 After registering the MCP server, Codex can call the `claude_run_stage` tool. This repository also includes a custom subagent config at `.codex/agents/claude-delegate.toml` for multi-agent workflows.
 
 Example Codex prompt:
