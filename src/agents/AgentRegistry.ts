@@ -1,4 +1,5 @@
 import type { AgentName, AgentProfileName, Effort, Stage, TaskCategory } from "../types.js";
+import type { BridgeConfig } from "../config/BridgeConfig.js";
 
 export interface AgentDefinition {
   name: AgentName;
@@ -142,28 +143,37 @@ const profiles: Record<string, AgentProfile> = {
 };
 
 export class AgentRegistry {
+  private readonly agents = agents;
+  private readonly categories: Record<string, CategoryDefinition>;
+  private readonly profiles: Record<string, AgentProfile>;
+
+  constructor(config: BridgeConfig = {}) {
+    this.categories = mergeDefinitions(categories, config.categories);
+    this.profiles = mergeDefinitions(profiles, config.profiles);
+  }
+
   getAgent(name: AgentName): AgentDefinition | undefined {
-    return agents[name];
+    return this.agents[name];
   }
 
   getCategory(name: TaskCategory): CategoryDefinition | undefined {
-    return categories[name];
+    return this.categories[name];
   }
 
   getProfile(name: AgentProfileName): AgentProfile | undefined {
-    return profiles[name];
+    return this.profiles[name];
   }
 
   listAgents(): AgentDefinition[] {
-    return Object.values(agents);
+    return Object.values(this.agents);
   }
 
   listCategories(): CategoryDefinition[] {
-    return Object.values(categories);
+    return Object.values(this.categories);
   }
 
   listProfiles(): AgentProfile[] {
-    return Object.values(profiles);
+    return Object.values(this.profiles);
   }
 
   classifyTask(input: TaskClassificationInput): TaskCategory {
@@ -177,4 +187,20 @@ export class AgentRegistry {
     if (/\b(plan|design|方案|计划|规划)\b/.test(text)) return "planning";
     return text.length < 240 ? "fast" : "planning";
   }
+}
+
+function mergeDefinitions<T extends { name: string }>(
+  builtins: Record<string, T>,
+  overrides: Record<string, Partial<T>> | undefined
+): Record<string, T> {
+  if (!overrides) return { ...builtins };
+  const merged: Record<string, T> = { ...builtins };
+  for (const [name, override] of Object.entries(overrides)) {
+    merged[name] = {
+      ...(merged[name] ?? { name }),
+      ...override,
+      name
+    } as T;
+  }
+  return merged;
 }

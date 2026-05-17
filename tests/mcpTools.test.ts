@@ -129,6 +129,37 @@ describe("delegate task MCP tools", () => {
     assert.equal(status.structuredContent?.status, "cancelled");
   });
 
+  it("reads background output artifacts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-output-test-"));
+    const tools = createTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "done output" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const launched = await tools.delegateTaskTool({
+      mode: "background",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-output-run"
+    });
+    const taskId = String(launched.structuredContent?.taskId);
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const output = await tools.backgroundOutputTool({ taskId });
+    assert.equal(output.structuredContent?.ok, true);
+    assert.match(JSON.stringify(output.structuredContent), /done output/);
+  });
+
   it("uses profiles to select stages and routing defaults", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-profile-test-"));
     const tools = createTaskTools({
@@ -195,5 +226,44 @@ describe("delegate task MCP tools", () => {
     const catalog = await tools.agentCatalogTool();
     assert.equal(catalog.structuredContent?.ok, true);
     assert.ok(Array.isArray(catalog.structuredContent?.profiles));
+  });
+
+  it("uses external config for profile routing", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-config-test-"));
+    const tools = createTaskTools({
+      config: {
+        profiles: {
+          "custom-coder": {
+            description: "Custom coding profile",
+            category: "coding",
+            agent: "claude",
+            stages: ["implement"],
+            timeoutMs: 1234
+          }
+        }
+      },
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({ result: `timeout=${options.timeoutMs}` }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.delegateTaskTool({
+      mode: "sync",
+      profile: "custom-coder",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-config-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    const structured = result.structuredContent as { result?: { results?: Array<{ agent?: string; stage?: string }> } };
+    assert.equal(structured.result?.results?.[0]?.agent, "claude");
   });
 });

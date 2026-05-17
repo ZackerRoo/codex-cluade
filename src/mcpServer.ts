@@ -28,6 +28,7 @@ export function createServer(): McpServer {
         workspace: z.string().min(1).describe("Absolute workspace path where Claude Code should run."),
         request: z.string().min(1).describe("User request or stage prompt to send to Claude Code."),
         runId: z.string().optional().describe("Optional run id for .agent-runs artifacts."),
+        agentSessionId: z.string().optional().describe("Optional Claude session id to resume."),
         model: z.string().optional().describe("Optional Claude model argument."),
         effort: effortSchema.describe("Optional Claude effort level."),
         timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
@@ -59,6 +60,7 @@ export function createServer(): McpServer {
         autoCategory: z.boolean().optional().describe("Infer a category from the request when category/profile/preferredAgent are omitted."),
         preferredAgent: agentSchema.describe("Explicit agent override."),
         runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
+        agentSessionId: z.string().optional().describe("Optional Claude session id to resume when a Claude stage runs."),
         model: z.string().optional().describe("Optional model argument for compatible providers."),
         effort: effortSchema.describe("Optional effort level."),
         timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
@@ -89,6 +91,25 @@ export function createServer(): McpServer {
       }
     },
     async args => taskTools.taskStatusTool(args)
+  );
+
+  server.registerTool(
+    "background_output",
+    {
+      title: "Background output",
+      description: "Read task artifacts, Claude logs, and transcript tail for a background delegated task.",
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id returned by delegate_task."),
+        maxBytes: z.number().positive().optional().describe("Maximum bytes to read from each output/log file.")
+      },
+      annotations: {
+        title: "Background output",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.backgroundOutputTool(args)
   );
 
   server.registerTool(

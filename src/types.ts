@@ -13,6 +13,7 @@ export interface StageInput {
   workspace: string;
   request: string;
   runId?: string;
+  agentSessionId?: string;
   previousOutputs?: Record<string, string>;
   model?: string;
   effort?: Effort;

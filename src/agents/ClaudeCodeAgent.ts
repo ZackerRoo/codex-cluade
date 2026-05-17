@@ -46,6 +46,9 @@ export class ClaudeCodeAgent implements AgentProvider {
       "--debug-file",
       logPath
     ];
+    if (input.agentSessionId) {
+      args.push("--resume", input.agentSessionId);
+    }
     if (input.stage !== "implement") {
       args.push("--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
     }

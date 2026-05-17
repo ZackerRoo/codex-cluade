@@ -85,6 +85,38 @@ describe("ClaudeCodeAgent", () => {
     assert.ok(!calls[0].includes("--disallowedTools"));
   });
 
+  it("passes agentSessionId to Claude resume", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const sessionId = "57a91bf5-6a80-43c7-93d0-4095a19b4302";
+    const calls: string[][] = [];
+    const agent = new ClaudeCodeAgent({
+      claudePath: "claude",
+      exec: async (_command: string, args: string[]) => {
+        calls.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ result: "continued", session_id: sessionId }),
+          stderr: "",
+          timedOut: false
+        };
+      },
+      getChangedFiles: async () => []
+    });
+
+    await agent.run({
+      stage: "implement",
+      agent: "claude",
+      workspace,
+      request: "Continue implementation",
+      runId: "2026-05-16-continued",
+      agentSessionId: sessionId
+    });
+
+    const resumeIndex = calls[0].indexOf("--resume");
+    assert.notEqual(resumeIndex, -1);
+    assert.equal(calls[0][resumeIndex + 1], sessionId);
+  });
+
   it("returns explicit error when claude exits non-zero with empty stdout and stderr", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
     const agent = new ClaudeCodeAgent({

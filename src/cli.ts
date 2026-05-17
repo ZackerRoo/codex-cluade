@@ -24,6 +24,7 @@ async function main(argv: string[]): Promise<void> {
       workspace: { type: "string" },
       "request-file": { type: "string" },
       "run-id": { type: "string" },
+      "agent-session-id": { type: "string" },
       model: { type: "string" },
       effort: { type: "string" },
       "timeout-ms": { type: "string" }
@@ -54,6 +55,7 @@ async function main(argv: string[]): Promise<void> {
     stages: [stage],
     routing: { [stage]: agent },
     runId: values["run-id"],
+    agentSessionId: values["agent-session-id"],
     model: values.model,
     effort: parseEffort(values.effort),
     timeoutMs

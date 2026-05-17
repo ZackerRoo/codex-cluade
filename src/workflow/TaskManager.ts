@@ -13,6 +13,7 @@ export interface DelegateTaskInput {
   autoCategory?: boolean;
   preferredAgent?: AgentName;
   runId?: string;
+  agentSessionId?: string;
   model?: string;
   effort?: CoordinatorInput["effort"];
   timeoutMs?: number;
@@ -46,6 +47,7 @@ export class TaskManager {
         autoCategory: input.autoCategory,
         preferredAgent: input.preferredAgent,
         runId: input.runId,
+        agentSessionId: input.agentSessionId,
         model: input.model,
         effort: input.effort,
         timeoutMs: input.timeoutMs
@@ -115,6 +117,7 @@ export class TaskManager {
         autoCategory: input.autoCategory,
         preferredAgent: input.preferredAgent,
         runId: task.runId,
+        agentSessionId: input.agentSessionId,
         model: input.model,
         effort: input.effort,
         timeoutMs: input.timeoutMs,

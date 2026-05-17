@@ -58,6 +58,7 @@ The bridge prints JSON that Codex can read and stores artifacts under `.agent-ru
 - `workspace`: absolute workspace path
 - `request`: user request or stage prompt
 - `runId`: optional artifact run id
+- `agentSessionId`: optional Claude Code session id to resume
 - `model`: optional Claude model
 - `effort`: optional Claude effort level, one of `low`, `medium`, `high`, `xhigh`, `max`
 - `timeoutMs`: optional timeout in milliseconds
@@ -81,17 +82,69 @@ Claude stage results also include traceability fields when the Claude session ca
 - `profile`: named routing profile, such as `planner`, `coder`, `reviewer`, `analyst`, `quick`, or `heavy-coder`
 - `autoCategory`: infer category and default stage from the request when no routing override is provided
 - `preferredAgent`: explicit agent override, `claude` or `codex`
+- `agentSessionId`: optional Claude Code session id to resume when a Claude stage runs
 - `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
 
 Background tasks return a `taskId`. Use:
 
 - `task_status`: inspect a background task
+- `background_output`: read task artifacts, Claude logs, and transcript tail
 - `task_list`: list tracked background tasks
 - `task_cancel`: cancel a background task
 - `agent_catalog`: list available agents, categories, and profiles
 
 Task state is in-memory for the current MCP server process. Artifacts still persist under `.agent-runs/<run-id>/`.
 Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-workspace>/<session-id>.jsonl`; the bridge surfaces the resolved path when available.
+
+## Session Continuation
+
+Use `agentSessionId` to continue a prior Claude Code session from the same workspace:
+
+```text
+Use delegate_task with profile="coder", agentSessionId="<claude-session-id>".
+workspace: /absolute/path/to/project
+request: Continue the previous implementation and fix the remaining issue.
+```
+
+`task_status` and `background_output` expose the resolved `agentSessionId`, `agentTranscriptPath`, and `resumeCommand` for Claude stages.
+
+## External Config
+
+The server loads an optional JSON config from the first available location:
+
+1. `CODEX_CLAUDE_CONFIG`
+2. `./codex-claude.config.json`
+3. `~/.codex-claude/config.json`
+
+Example:
+
+```json
+{
+  "claudePath": "/Users/me/.local/bin/claude",
+  "defaults": {
+    "timeoutMs": 900000
+  },
+  "profiles": {
+    "frontend-coder": {
+      "description": "Claude implementation profile for frontend tasks",
+      "category": "coding",
+      "agent": "claude",
+      "stages": ["implement"],
+      "effort": "high",
+      "timeoutMs": 900000,
+      "fallbacks": [{ "agent": "codex" }]
+    }
+  },
+  "categories": {
+    "frontend": {
+      "description": "Frontend implementation work",
+      "agent": "claude",
+      "effort": "high",
+      "fallbacks": [{ "agent": "codex" }]
+    }
+  }
+}
+```
 
 ## Stage Routing
 

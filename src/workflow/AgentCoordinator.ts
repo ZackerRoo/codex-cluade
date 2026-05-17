@@ -15,6 +15,7 @@ export interface CoordinatorInput {
   autoCategory?: boolean;
   preferredAgent?: AgentName;
   runId?: string;
+  agentSessionId?: string;
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
@@ -76,6 +77,7 @@ export class AgentCoordinator {
         workspace: input.workspace,
         request: input.request,
         runId,
+        agentSessionId: input.agentSessionId,
         previousOutputs,
         model: input.model ?? route.model ?? profile?.model,
         effort: input.effort ?? route.effort ?? profile?.effort,
@@ -92,6 +94,7 @@ export class AgentCoordinator {
             workspace: input.workspace,
             request: input.request,
             runId,
+            agentSessionId: input.agentSessionId,
             previousOutputs,
             model: input.model ?? fallback.model,
             effort: input.effort ?? fallback.effort,

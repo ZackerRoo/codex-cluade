@@ -3,15 +3,18 @@ import type { ClaudeCodeAgentOptions } from "../agents/ClaudeCodeAgent.js";
 import { AgentRegistry } from "../agents/AgentRegistry.js";
 import { ClaudeCodeAgent } from "../agents/ClaudeCodeAgent.js";
 import { CodexAgent } from "../agents/CodexAgent.js";
+import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
 import { TaskManager } from "../workflow/TaskManager.js";
+import { readBackgroundOutput } from "./backgroundOutput.js";
 
 export interface ClaudeRunStageArgs {
   stage: Stage;
   workspace: string;
   request: string;
   runId?: string;
+  agentSessionId?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
@@ -28,6 +31,7 @@ export interface DelegateTaskArgs {
   autoCategory?: boolean;
   preferredAgent?: AgentName;
   runId?: string;
+  agentSessionId?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
@@ -35,12 +39,14 @@ export interface DelegateTaskArgs {
 
 export interface TaskLookupArgs {
   taskId: string;
+  maxBytes?: number;
 }
 
 export interface TaskToolSet {
   delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult>;
   taskStatusTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskCancelTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskListTool(): Promise<CallToolResult>;
   agentCatalogTool(): Promise<CallToolResult>;
 }
@@ -63,6 +69,7 @@ export async function runClaudeStageTool(
       workspace: args.workspace,
       request: args.request,
       runId: args.runId,
+      agentSessionId: args.agentSessionId,
       model: args.model,
       effort: args.effort,
       timeoutMs: args.timeoutMs
@@ -83,12 +90,13 @@ export async function runClaudeStageTool(
   }
 }
 
-export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {}): TaskToolSet {
-  const registry = new AgentRegistry();
+export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; config?: BridgeConfig } = {}): TaskToolSet {
+  const config = options.config ?? loadBridgeConfig();
+  const registry = new AgentRegistry(config);
   const coordinator = new AgentCoordinator({
     providers: {
       claude: new ClaudeCodeAgent({
-        claudePath: process.env.CLAUDE_CODE_PATH,
+        claudePath: process.env.CLAUDE_CODE_PATH ?? config.claudePath,
         ...options.claude
       }),
       codex: new CodexAgent()
@@ -98,7 +106,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {
 
   return {
     async delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult> {
-      const validationError = validateDelegateArgs(args);
+      const validationError = validateDelegateArgs(args, registry);
       if (validationError) return errorResult(validationError);
 
       try {
@@ -121,9 +129,10 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {
           autoCategory: false,
           preferredAgent: args.preferredAgent,
           runId: args.runId,
+          agentSessionId: args.agentSessionId,
           model: args.model,
           effort: args.effort,
-          timeoutMs: args.timeoutMs
+          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs
         });
         return {
           content: [{ type: "text", text: formatDelegateResult(result) }],
@@ -158,6 +167,17 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {
       };
     },
 
+    async backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult> {
+      if (!args.taskId) return errorResult("taskId is required");
+      const task = manager.get(args.taskId);
+      if (!task) return errorResult(`Task not found: ${args.taskId}`);
+      const output = await readBackgroundOutput(task, args.maxBytes);
+      return {
+        content: [{ type: "text", text: formatBackgroundOutput(output) }],
+        structuredContent: { ok: true, ...output }
+      };
+    },
+
     async taskListTool(): Promise<CallToolResult> {
       const tasks = manager.list();
       return {
@@ -187,10 +207,11 @@ function validateArgs(args: ClaudeRunStageArgs): string | undefined {
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     return "timeoutMs must be a positive number";
   }
+  if (args.agentSessionId !== undefined && !isUuid(args.agentSessionId)) return "agentSessionId must be a Claude session UUID";
   return undefined;
 }
 
-function validateDelegateArgs(args: DelegateTaskArgs): string | undefined {
+function validateDelegateArgs(args: DelegateTaskArgs, registry = new AgentRegistry()): string | undefined {
   if (!args.workspace) return "workspace is required";
   if (!args.request) return "request is required";
   if (args.mode !== undefined && args.mode !== "sync" && args.mode !== "background") {
@@ -205,12 +226,12 @@ function validateDelegateArgs(args: DelegateTaskArgs): string | undefined {
     return `invalid preferredAgent: ${String(args.preferredAgent)}`;
   }
   if (args.profile !== undefined) {
-    const registry = new AgentRegistry();
     if (!registry.getProfile(args.profile)) return `invalid profile: ${String(args.profile)}`;
   }
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     return "timeoutMs must be a positive number";
   }
+  if (args.agentSessionId !== undefined && !isUuid(args.agentSessionId)) return "agentSessionId must be a Claude session UUID";
   return undefined;
 }
 
@@ -262,6 +283,26 @@ function formatTask(task: { id: string; status: string; runId: string; updatedAt
     `Updated: ${task.updatedAt}`,
     task.error ? `Error: ${task.error}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+function formatBackgroundOutput(output: Awaited<ReturnType<typeof readBackgroundOutput>>): string {
+  const lines = [
+    formatTask(output.task),
+    "",
+    ...output.artifacts.flatMap(artifact => [
+      `Artifact: ${artifact.path}`,
+      artifact.content || "(empty)",
+      ""
+    ])
+  ];
+  if (output.transcript) {
+    lines.push(`Transcript: ${output.transcript.path}`, output.transcript.tail || "(empty)");
+  }
+  return lines.join("\n").trim();
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 function defaultStagesForCategory(category: TaskCategory | undefined): Stage[] {
