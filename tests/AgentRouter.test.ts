@@ -27,4 +27,14 @@ describe("AgentRouter", () => {
     assert.equal(router.resolve("analyze", {}, { category: "heavy" }), "claude");
     assert.equal(router.resolve("implement", {}, { category: "review" }), "codex");
   });
+
+  it("routes named profiles with execution defaults", () => {
+    const router = new AgentRouter();
+    const route = router.resolveRoute("implement", {}, { profile: "heavy-coder" });
+
+    assert.equal(route.agent, "claude");
+    assert.equal(route.category, "heavy");
+    assert.equal(route.effort, "high");
+    assert.equal(route.timeoutMs, 900_000);
+  });
 });

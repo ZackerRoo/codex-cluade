@@ -72,13 +72,17 @@ The tool returns text plus structured JSON with status, output path, log path, c
 - `workspace`: absolute workspace path
 - `request`: user request or task prompt
 - `category`: routing category, such as `planning`, `coding`, `review`, `analysis`, `fast`, or `heavy`
+- `profile`: named routing profile, such as `planner`, `coder`, `reviewer`, `analyst`, `quick`, or `heavy-coder`
+- `autoCategory`: infer category and default stage from the request when no routing override is provided
 - `preferredAgent`: explicit agent override, `claude` or `codex`
 - `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
 
 Background tasks return a `taskId`. Use:
 
 - `task_status`: inspect a background task
+- `task_list`: list tracked background tasks
 - `task_cancel`: cancel a background task
+- `agent_catalog`: list available agents, categories, and profiles
 
 Task state is in-memory for the current MCP server process. Artifacts still persist under `.agent-runs/<run-id>/`.
 
@@ -98,7 +102,18 @@ Category routing:
 - `fast`: routes to `codex`
 - `heavy`: routes to `claude`
 
-Routing precedence is: `preferredAgent` > `category` > explicit per-stage routing > stage defaults.
+Named profiles:
+
+- `planner`: Codex plan stage
+- `coder`: Claude implement stage
+- `reviewer`: Codex review stage
+- `analyst`: Codex analyze stage
+- `quick`: low-effort Codex handoff
+- `heavy-coder`: Claude implement stage with higher effort and a longer timeout
+
+Routing precedence is: `preferredAgent` > `profile` > `category` > explicit per-stage routing > stage defaults. If no `stage`, `stages`, `category`, `profile`, or `preferredAgent` is provided, `delegate_task` infers a category from the request and chooses the default stage for that category.
+
+`coding`, `heavy`, `coder`, and `heavy-coder` include a runtime fallback chain: try Claude first, then fall back to Codex with `requiresCodex: true` if Claude fails. Explicit `preferredAgent` disables fallback because the caller has chosen a concrete agent.
 
 ## Agents
 

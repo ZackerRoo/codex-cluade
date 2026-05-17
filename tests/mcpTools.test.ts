@@ -128,4 +128,72 @@ describe("delegate task MCP tools", () => {
     const status = await tools.taskStatusTool({ taskId });
     assert.equal(status.structuredContent?.status, "cancelled");
   });
+
+  it("uses profiles to select stages and routing defaults", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-profile-test-"));
+    const tools = createTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({ result: `effort=${options.timeoutMs}` }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.delegateTaskTool({
+      mode: "sync",
+      profile: "heavy-coder",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-profile-run"
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent?.ok, true);
+    const structured = result.structuredContent as { result?: { results?: Array<{ agent?: string; stage?: string }> } };
+    assert.equal(structured.result?.results?.[0]?.agent, "claude");
+    assert.equal(structured.result?.results?.[0]?.stage, "implement");
+  });
+
+  it("auto-classifies implementation requests when stage is omitted", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-auto-test-"));
+    const tools = createTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "implemented" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.delegateTaskTool({
+      mode: "sync",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-auto-run"
+    });
+
+    const structured = result.structuredContent as { result?: { results?: Array<{ agent?: string; stage?: string }> } };
+    assert.equal(structured.result?.results?.[0]?.agent, "claude");
+    assert.equal(structured.result?.results?.[0]?.stage, "implement");
+  });
+
+  it("lists task and agent catalog metadata", async () => {
+    const tools = createTaskTools();
+
+    const tasks = await tools.taskListTool();
+    assert.equal(tasks.structuredContent?.ok, true);
+
+    const catalog = await tools.agentCatalogTool();
+    assert.equal(catalog.structuredContent?.ok, true);
+    assert.ok(Array.isArray(catalog.structuredContent?.profiles));
+  });
 });

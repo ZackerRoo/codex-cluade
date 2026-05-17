@@ -1,8 +1,9 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ClaudeCodeAgentOptions } from "../agents/ClaudeCodeAgent.js";
+import { AgentRegistry } from "../agents/AgentRegistry.js";
 import { ClaudeCodeAgent } from "../agents/ClaudeCodeAgent.js";
 import { CodexAgent } from "../agents/CodexAgent.js";
-import type { AgentName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
+import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
 import { TaskManager } from "../workflow/TaskManager.js";
 
@@ -23,6 +24,8 @@ export interface DelegateTaskArgs {
   workspace: string;
   request: string;
   category?: TaskCategory;
+  profile?: AgentProfileName;
+  autoCategory?: boolean;
   preferredAgent?: AgentName;
   runId?: string;
   model?: string;
@@ -38,6 +41,8 @@ export interface TaskToolSet {
   delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult>;
   taskStatusTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskCancelTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  taskListTool(): Promise<CallToolResult>;
+  agentCatalogTool(): Promise<CallToolResult>;
 }
 
 export async function runClaudeStageTool(
@@ -79,6 +84,7 @@ export async function runClaudeStageTool(
 }
 
 export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {}): TaskToolSet {
+  const registry = new AgentRegistry();
   const coordinator = new AgentCoordinator({
     providers: {
       claude: new ClaudeCodeAgent({
@@ -96,14 +102,23 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {
       if (validationError) return errorResult(validationError);
 
       try {
-        const stages = args.stages ?? (args.stage ? [args.stage] : ["plan"]);
+        const profile = args.profile ? registry.getProfile(args.profile) : undefined;
+        const explicitStages = args.stages ?? (args.stage ? [args.stage] : undefined);
+        const inferredCategory = args.category ?? (
+          !args.profile && !args.preferredAgent && args.autoCategory !== false
+            ? registry.classifyTask({ request: args.request, stages: explicitStages ?? [] })
+            : undefined
+        );
+        const stages = explicitStages ?? profile?.stages ?? defaultStagesForCategory(inferredCategory);
         const result = await manager.run({
           mode: args.mode ?? "sync",
           workspace: args.workspace,
           request: args.request,
           stages,
           routing: {},
-          category: args.category,
+          category: inferredCategory,
+          profile: args.profile,
+          autoCategory: false,
           preferredAgent: args.preferredAgent,
           runId: args.runId,
           model: args.model,
@@ -141,6 +156,26 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions } = {
         content: [{ type: "text", text: formatTask(task) }],
         structuredContent: { ok: true, ...task }
       };
+    },
+
+    async taskListTool(): Promise<CallToolResult> {
+      const tasks = manager.list();
+      return {
+        content: [{ type: "text", text: tasks.length === 0 ? "No background tasks." : tasks.map(formatTask).join("\n\n") }],
+        structuredContent: { ok: true, tasks }
+      };
+    },
+
+    async agentCatalogTool(): Promise<CallToolResult> {
+      const catalog = {
+        agents: registry.listAgents(),
+        categories: registry.listCategories(),
+        profiles: registry.listProfiles()
+      };
+      return {
+        content: [{ type: "text", text: formatCatalog(catalog) }],
+        structuredContent: { ok: true, ...catalog }
+      };
     }
   };
 }
@@ -168,6 +203,10 @@ function validateDelegateArgs(args: DelegateTaskArgs): string | undefined {
   }
   if (args.preferredAgent !== undefined && args.preferredAgent !== "claude" && args.preferredAgent !== "codex") {
     return `invalid preferredAgent: ${String(args.preferredAgent)}`;
+  }
+  if (args.profile !== undefined) {
+    const registry = new AgentRegistry();
+    if (!registry.getProfile(args.profile)) return `invalid profile: ${String(args.profile)}`;
   }
   if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
     return "timeoutMs must be a positive number";
@@ -220,6 +259,30 @@ function formatTask(task: { id: string; status: string; runId: string; updatedAt
     `Updated: ${task.updatedAt}`,
     task.error ? `Error: ${task.error}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+function defaultStagesForCategory(category: TaskCategory | undefined): Stage[] {
+  if (category === "coding" || category === "heavy") return ["implement"];
+  if (category === "review") return ["review"];
+  if (category === "analysis") return ["analyze"];
+  return ["plan"];
+}
+
+function formatCatalog(catalog: {
+  agents: ReturnType<AgentRegistry["listAgents"]>;
+  categories: ReturnType<AgentRegistry["listCategories"]>;
+  profiles: ReturnType<AgentRegistry["listProfiles"]>;
+}): string {
+  return [
+    "Agents",
+    ...catalog.agents.map(agent => `- ${agent.name}: ${agent.description}`),
+    "",
+    "Categories",
+    ...catalog.categories.map(category => `- ${category.name}: ${category.agent} - ${category.description}`),
+    "",
+    "Profiles",
+    ...catalog.profiles.map(profile => `- ${profile.name}: ${profile.agent}/${profile.category} - ${profile.description}`)
+  ].join("\n");
 }
 
 function errorResult(message: string): CallToolResult {

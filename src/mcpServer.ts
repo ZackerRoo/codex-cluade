@@ -55,6 +55,8 @@ export function createServer(): McpServer {
         workspace: z.string().min(1).describe("Absolute workspace path where the task should run."),
         request: z.string().min(1).describe("User request or task prompt."),
         category: z.string().optional().describe("Routing category such as planning, coding, review, analysis, fast, or heavy."),
+        profile: z.string().optional().describe("Named routing profile such as planner, coder, reviewer, analyst, quick, or heavy-coder."),
+        autoCategory: z.boolean().optional().describe("Infer a category from the request when category/profile/preferredAgent are omitted."),
         preferredAgent: agentSchema.describe("Explicit agent override."),
         runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
         model: z.string().optional().describe("Optional model argument for compatible providers."),
@@ -87,6 +89,38 @@ export function createServer(): McpServer {
       }
     },
     async args => taskTools.taskStatusTool(args)
+  );
+
+  server.registerTool(
+    "task_list",
+    {
+      title: "List tasks",
+      description: "List background delegated tasks tracked by the current MCP server process.",
+      inputSchema: {},
+      annotations: {
+        title: "List tasks",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.taskListTool()
+  );
+
+  server.registerTool(
+    "agent_catalog",
+    {
+      title: "Agent catalog",
+      description: "List available agents, routing categories, and named delegation profiles.",
+      inputSchema: {},
+      annotations: {
+        title: "Agent catalog",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.agentCatalogTool()
   );
 
   server.registerTool(

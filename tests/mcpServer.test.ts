@@ -19,6 +19,8 @@ describe("mcpServer", () => {
       assert.ok(tools.tools.some(tool => tool.name === "claude_run_stage"));
       assert.ok(tools.tools.some(tool => tool.name === "delegate_task"));
       assert.ok(tools.tools.some(tool => tool.name === "task_status"));
+      assert.ok(tools.tools.some(tool => tool.name === "task_list"));
+      assert.ok(tools.tools.some(tool => tool.name === "agent_catalog"));
       assert.ok(tools.tools.some(tool => tool.name === "task_cancel"));
     } finally {
       await client.close();

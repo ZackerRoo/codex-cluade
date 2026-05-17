@@ -1,10 +1,21 @@
 import { AgentRegistry } from "../agents/AgentRegistry.js";
-import type { AgentName, Stage, TaskCategory } from "../types.js";
+import type { AgentRouteCandidate } from "../agents/AgentRegistry.js";
+import type { AgentName, AgentProfileName, Effort, Stage, TaskCategory } from "../types.js";
 
 export type RoutingConfig = Partial<Record<Stage, AgentName>>;
 export interface RoutingContext {
   category?: TaskCategory;
+  profile?: AgentProfileName;
   preferredAgent?: AgentName;
+}
+export interface AgentRoute {
+  agent: AgentName;
+  category?: TaskCategory;
+  profile?: AgentProfileName;
+  model?: string;
+  effort?: Effort;
+  timeoutMs?: number;
+  fallbacks?: AgentRouteCandidate[];
 }
 
 const defaults: Record<Stage, AgentName> = {
@@ -18,11 +29,37 @@ export class AgentRouter {
   constructor(private readonly registry = new AgentRegistry()) {}
 
   resolve(stage: Stage, config: RoutingConfig, context: RoutingContext = {}): AgentName {
-    if (context.preferredAgent) return context.preferredAgent;
+    return this.resolveRoute(stage, config, context).agent;
+  }
+
+  resolveRoute(stage: Stage, config: RoutingConfig, context: RoutingContext = {}): AgentRoute {
+    if (context.preferredAgent) return { agent: context.preferredAgent };
+    if (context.profile) {
+      const profile = this.registry.getProfile(context.profile);
+      if (profile) {
+        return {
+          agent: profile.agent,
+          category: profile.category,
+          profile: profile.name,
+          model: profile.model,
+          effort: profile.effort,
+          timeoutMs: profile.timeoutMs,
+          fallbacks: profile.fallbacks
+        };
+      }
+    }
     if (context.category) {
       const category = this.registry.getCategory(context.category);
-      if (category) return category.agent;
+      if (category) {
+        return {
+          agent: category.agent,
+          category: category.name,
+          model: category.model,
+          effort: category.effort,
+          fallbacks: category.fallbacks
+        };
+      }
     }
-    return config[stage] ?? defaults[stage];
+    return { agent: config[stage] ?? defaults[stage] };
   }
 }

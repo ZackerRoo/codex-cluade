@@ -1,4 +1,4 @@
-import type { AgentName, DelegatedTask, Stage, TaskCategory, TaskMode } from "../types.js";
+import type { AgentName, AgentProfileName, DelegatedTask, Stage, TaskCategory, TaskMode } from "../types.js";
 import type { CoordinatorResult } from "./AgentCoordinator.js";
 import { AgentCoordinator, type CoordinatorInput } from "./AgentCoordinator.js";
 
@@ -9,6 +9,8 @@ export interface DelegateTaskInput {
   stages: Stage[];
   routing: CoordinatorInput["routing"];
   category?: TaskCategory;
+  profile?: AgentProfileName;
+  autoCategory?: boolean;
   preferredAgent?: AgentName;
   runId?: string;
   model?: string;
@@ -40,6 +42,8 @@ export class TaskManager {
         stages: input.stages,
         routing: input.routing,
         category: input.category,
+        profile: input.profile,
+        autoCategory: input.autoCategory,
         preferredAgent: input.preferredAgent,
         runId: input.runId,
         model: input.model,
@@ -79,16 +83,18 @@ export class TaskManager {
 
   private createTask(input: DelegateTaskInput): StoredTask {
     const now = new Date().toISOString();
+    const id = input.runId ?? createTaskId();
     return {
-      id: input.runId ?? createTaskId(),
+      id,
       mode: input.mode,
       status: "pending",
       workspace: input.workspace,
       request: input.request,
       stages: input.stages,
       category: input.category,
+      profile: input.profile,
       preferredAgent: input.preferredAgent,
-      runId: input.runId ?? createTaskId(),
+      runId: id,
       createdAt: now,
       updatedAt: now,
       controller: new AbortController()
@@ -105,6 +111,8 @@ export class TaskManager {
         stages: input.stages,
         routing: input.routing,
         category: input.category,
+        profile: input.profile,
+        autoCategory: input.autoCategory,
         preferredAgent: input.preferredAgent,
         runId: task.runId,
         model: input.model,

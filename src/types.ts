@@ -4,6 +4,8 @@ export type StageStatus = "completed" | "failed" | "requires_codex" | "skipped";
 export type TaskMode = "sync" | "background";
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type TaskCategory = "planning" | "coding" | "review" | "analysis" | "fast" | "heavy" | string;
+export type AgentProfileName = "planner" | "coder" | "reviewer" | "analyst" | "quick" | "heavy-coder" | string;
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface StageInput {
   stage: Stage;
@@ -13,7 +15,7 @@ export interface StageInput {
   runId?: string;
   previousOutputs?: Record<string, string>;
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: Effort;
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -40,6 +42,7 @@ export interface DelegatedTask {
   request: string;
   stages: Stage[];
   category?: TaskCategory;
+  profile?: AgentProfileName;
   preferredAgent?: AgentName;
   runId: string;
   createdAt: string;
