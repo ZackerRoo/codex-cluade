@@ -5,6 +5,19 @@ export class StageRunner {
   constructor(private readonly providers: Partial<Record<AgentName, AgentProvider>>) {}
 
   async run(input: StageInput): Promise<StageResult> {
+    if (input.signal?.aborted) {
+      return {
+        ok: false,
+        runId: input.runId ?? "manual",
+        stage: input.stage,
+        agent: input.agent,
+        status: "failed",
+        changedFiles: [],
+        requiresCodex: false,
+        summary: `${input.stage} cancelled`,
+        error: "Task cancelled"
+      };
+    }
     const provider = this.providers[input.agent];
     if (!provider) {
       return {

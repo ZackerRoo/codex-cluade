@@ -8,7 +8,7 @@ import { changedFiles } from "../utils/git.js";
 type ExecFn = (
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string }
+  options: { cwd: string; timeoutMs: number; input?: string; signal?: AbortSignal }
 ) => Promise<ExecResult>;
 
 export interface ClaudeCodeAgentOptions {
@@ -35,7 +35,7 @@ export class ClaudeCodeAgent implements AgentProvider {
     const prompt = buildStagePrompt({ ...input, runId });
     await store.writeStageInput(runId, input.stage, prompt);
     const logPath = await store.writeLog(runId, `claude-${input.stage}.log`, "");
-    const permissionMode = input.stage === "implement" ? "acceptEdits" : "default";
+    const permissionMode = input.stage === "implement" ? "bypassPermissions" : "default";
     const args = [
       "-p",
       "--output-format",
@@ -55,7 +55,8 @@ export class ClaudeCodeAgent implements AgentProvider {
     const result = await this.exec(this.claudePath, args, {
       cwd: input.workspace,
       timeoutMs: input.timeoutMs ?? 15 * 60 * 1000,
-      input: prompt
+      input: prompt,
+      signal: input.signal
     });
 
     const outputText = extractClaudeOutput(result.stdout);
@@ -63,6 +64,17 @@ export class ClaudeCodeAgent implements AgentProvider {
     const files = await this.getChangedFiles(input.workspace);
 
     if (result.timedOut || result.code !== 0) {
+      let error: string;
+      if (result.timedOut) {
+        error = "Claude command timed out";
+      } else if (result.stderr) {
+        error = result.stderr;
+      } else {
+        const detail = result.stdout
+          ? `empty stderr (exit code ${result.code})`
+          : `empty stdout and stderr (exit code ${result.code})`;
+        error = `Claude CLI produced no output: ${detail}. See log at ${logPath}`;
+      }
       return {
         ok: false,
         runId,
@@ -74,7 +86,7 @@ export class ClaudeCodeAgent implements AgentProvider {
         changedFiles: files,
         requiresCodex: false,
         summary: `Claude ${input.stage} failed`,
-        error: result.timedOut ? "Claude command timed out" : result.stderr
+        error
       };
     }
 

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type { AgentProvider } from "../agents/AgentProvider.js";
-import type { AgentName, Stage, StageResult } from "../types.js";
+import type { AgentName, Stage, StageResult, TaskCategory } from "../types.js";
 import { AgentRouter, type RoutingConfig } from "./AgentRouter.js";
 import { StageRunner } from "./StageRunner.js";
 
@@ -9,10 +9,13 @@ export interface CoordinatorInput {
   request: string;
   stages: Stage[];
   routing: RoutingConfig;
+  category?: TaskCategory;
+  preferredAgent?: AgentName;
   runId?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface CoordinatorResult {
@@ -36,7 +39,24 @@ export class AgentCoordinator {
     const results: StageResult[] = [];
 
     for (const stage of input.stages) {
-      const agent = this.router.resolve(stage, input.routing);
+      if (input.signal?.aborted) {
+        results.push({
+          ok: false,
+          runId,
+          stage,
+          agent: "codex",
+          status: "failed",
+          changedFiles: [],
+          requiresCodex: false,
+          summary: `${stage} cancelled`,
+          error: "Task cancelled"
+        });
+        break;
+      }
+      const agent = this.router.resolve(stage, input.routing, {
+        category: input.category,
+        preferredAgent: input.preferredAgent
+      });
       const result = await this.runner.run({
         stage,
         agent,
@@ -46,7 +66,8 @@ export class AgentCoordinator {
         previousOutputs,
         model: input.model,
         effort: input.effort,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        signal: input.signal
       });
       results.push(result);
       previousOutputs[stage] = await loadResultOutput(result);

@@ -14,4 +14,17 @@ describe("AgentRouter", () => {
     assert.equal(router.resolve("implement", {}), "claude");
     assert.equal(router.resolve("review", {}), "codex");
   });
+
+  it("uses preferred agent before category and defaults", () => {
+    const router = new AgentRouter();
+    assert.equal(router.resolve("review", {}, { preferredAgent: "claude", category: "review" }), "claude");
+  });
+
+  it("routes common categories to default agents", () => {
+    const router = new AgentRouter();
+    assert.equal(router.resolve("plan", {}, { category: "coding" }), "claude");
+    assert.equal(router.resolve("implement", {}, { category: "fast" }), "codex");
+    assert.equal(router.resolve("analyze", {}, { category: "heavy" }), "claude");
+    assert.equal(router.resolve("implement", {}, { category: "review" }), "codex");
+  });
 });

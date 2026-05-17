@@ -50,7 +50,7 @@ describe("ClaudeCodeAgent", () => {
     assert.match(inputs[0] ?? "", /Stage: plan/);
   });
 
-  it("runs claude implement stage with edit permissions", async () => {
+  it("runs claude implement stage with full permissions", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
     const calls: string[][] = [];
     const agent = new ClaudeCodeAgent({
@@ -78,7 +78,89 @@ describe("ClaudeCodeAgent", () => {
     assert.equal(result.ok, true);
     assert.equal(result.changedFiles[0], "src/example.ts");
     assert.ok(calls[0].includes("--permission-mode"));
-    assert.ok(calls[0].includes("acceptEdits"));
+    assert.ok(calls[0].includes("bypassPermissions"));
     assert.ok(!calls[0].includes("--disallowedTools"));
+  });
+
+  it("returns explicit error when claude exits non-zero with empty stdout and stderr", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const agent = new ClaudeCodeAgent({
+      claudePath: "claude",
+      exec: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "",
+        timedOut: false
+      }),
+      getChangedFiles: async () => []
+    });
+
+    const result = await agent.run({
+      stage: "plan",
+      agent: "claude",
+      workspace,
+      request: "Add login cache",
+      runId: "2026-05-16-003"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "failed");
+    assert.ok(result.error, "expected an error message to be set");
+    assert.match(result.error ?? "", /no output/i);
+    assert.match(result.error ?? "", /empty stdout and stderr/i);
+    assert.ok(
+      (result.error ?? "").includes(result.logPath ?? ""),
+      "expected error to reference log path"
+    );
+  });
+
+  it("preserves stderr as error when claude exits non-zero with stderr", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const agent = new ClaudeCodeAgent({
+      claudePath: "claude",
+      exec: async () => ({
+        code: 2,
+        stdout: "",
+        stderr: "boom: something went wrong",
+        timedOut: false
+      }),
+      getChangedFiles: async () => []
+    });
+
+    const result = await agent.run({
+      stage: "plan",
+      agent: "claude",
+      workspace,
+      request: "Add login cache",
+      runId: "2026-05-16-004"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "boom: something went wrong");
+  });
+
+  it("reports timeout error without being shadowed by empty-output handling", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const agent = new ClaudeCodeAgent({
+      claudePath: "claude",
+      exec: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "",
+        timedOut: true
+      }),
+      getChangedFiles: async () => []
+    });
+
+    const result = await agent.run({
+      stage: "plan",
+      agent: "claude",
+      workspace,
+      request: "Add login cache",
+      runId: "2026-05-16-005"
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "Claude command timed out");
   });
 });

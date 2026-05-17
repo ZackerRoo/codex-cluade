@@ -24,7 +24,7 @@ env_vars = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
 CLAUDE_CODE_PATH = "/Users/luozhenkun/.local/bin/claude"
 ```
 
-After registering the MCP server, Codex can call the `claude_run_stage` tool. This repository also includes a custom subagent config at `.codex/agents/claude-delegate.toml` for multi-agent workflows.
+After registering the MCP server, Codex can call the `claude_run_stage` compatibility tool or the newer `delegate_task` orchestration tool. This repository also includes a custom subagent config at `.codex/agents/claude-delegate.toml` for multi-agent workflows.
 
 Example Codex prompt:
 
@@ -50,7 +50,7 @@ npm run bridge -- run-stage \
 
 The bridge prints JSON that Codex can read and stores artifacts under `.agent-runs/<run-id>/`.
 
-## MCP Tool
+## MCP Tools
 
 `claude_run_stage` input:
 
@@ -64,12 +64,41 @@ The bridge prints JSON that Codex can read and stores artifacts under `.agent-ru
 
 The tool returns text plus structured JSON with status, output path, log path, changed files, and errors.
 
+`delegate_task` is the higher-level orchestration entry point inspired by Oh My OpenCode's `delegate_task` pattern:
+
+- `mode`: `sync` or `background` (default: `sync`)
+- `stage`: single stage to run
+- `stages`: ordered stage list for multi-stage workflows
+- `workspace`: absolute workspace path
+- `request`: user request or task prompt
+- `category`: routing category, such as `planning`, `coding`, `review`, `analysis`, `fast`, or `heavy`
+- `preferredAgent`: explicit agent override, `claude` or `codex`
+- `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
+
+Background tasks return a `taskId`. Use:
+
+- `task_status`: inspect a background task
+- `task_cancel`: cancel a background task
+
+Task state is in-memory for the current MCP server process. Artifacts still persist under `.agent-runs/<run-id>/`.
+
 ## Stage Routing
 
 - `plan`: produce a plan, no edits
 - `implement`: edit files, no commits
 - `review`: review current changes
 - `analyze`: analyze only, no edits
+
+Category routing:
+
+- `planning`: routes to `codex`
+- `coding`: routes to `claude`
+- `review`: routes to `codex`
+- `analysis`: routes to `codex`
+- `fast`: routes to `codex`
+- `heavy`: routes to `claude`
+
+Routing precedence is: `preferredAgent` > `category` > explicit per-stage routing > stage defaults.
 
 ## Agents
 
@@ -79,8 +108,8 @@ The tool returns text plus structured JSON with status, output path, log path, c
 ## Safety
 
 - Claude Code runs only in the provided workspace.
-- `plan`, `review`, and `analyze` use Claude permission mode `plan`.
-- `implement` uses Claude permission mode `acceptEdits`.
+- `plan`, `review`, and `analyze` use Claude permission mode `default` with edit tools disabled.
+- `implement` uses Claude permission mode `bypassPermissions` so Claude Code can run implementation commands without permission prompts.
 - The bridge never commits.
 - The bridge records prompts, outputs, logs, and changed files.
 

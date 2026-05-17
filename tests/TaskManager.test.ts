@@ -1,0 +1,82 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type { AgentProvider } from "../src/agents/AgentProvider.js";
+import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
+import { TaskManager } from "../src/workflow/TaskManager.js";
+import type { AgentName, StageInput, StageResult } from "../src/types.js";
+
+class SlowProvider implements AgentProvider {
+  constructor(readonly name: AgentName) {}
+
+  async run(input: StageInput): Promise<StageResult> {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 50);
+      input.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new Error("aborted"));
+      });
+    });
+
+    return {
+      ok: true,
+      runId: input.runId ?? "test-run",
+      stage: input.stage,
+      agent: this.name,
+      status: "completed",
+      changedFiles: [],
+      requiresCodex: false,
+      summary: `${this.name} ${input.stage}`
+    };
+  }
+}
+
+describe("TaskManager", () => {
+  it("runs sync delegated tasks through the coordinator", async () => {
+    const manager = createManager();
+    const result = await manager.run({
+      mode: "sync",
+      workspace: "/tmp/project",
+      request: "Plan login cache",
+      stages: ["plan"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "sync-run"
+    });
+
+    assert.equal(result.mode, "sync");
+    assert.equal(result.result?.ok, true);
+    assert.equal(result.result?.results[0].agent, "claude");
+  });
+
+  it("starts, reports, and cancels background tasks", async () => {
+    const manager = createManager();
+    const launched = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Implement login cache",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "background-run"
+    });
+
+    assert.equal(launched.mode, "background");
+    assert.ok(launched.taskId);
+
+    const cancelled = manager.cancel(launched.taskId);
+    assert.equal(cancelled?.status, "cancelled");
+
+    const status = manager.get(launched.taskId);
+    assert.equal(status?.status, "cancelled");
+  });
+});
+
+function createManager(): TaskManager {
+  const coordinator = new AgentCoordinator({
+    providers: {
+      claude: new SlowProvider("claude"),
+      codex: new SlowProvider("codex")
+    }
+  });
+  return new TaskManager(coordinator);
+}

@@ -10,7 +10,7 @@ export interface ExecResult {
 export function execFileCapture(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string }
+  options: { cwd: string; timeoutMs: number; input?: string; signal?: AbortSignal }
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -26,6 +26,7 @@ export function execFileCapture(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
       resolve(result);
     };
 
@@ -33,6 +34,12 @@ export function execFileCapture(
       child.kill("SIGTERM");
       finish({ code: null, stdout, stderr, timedOut: true });
     }, options.timeoutMs);
+
+    const abort = () => {
+      child.kill("SIGTERM");
+      finish({ code: null, stdout, stderr, timedOut: false });
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -46,6 +53,7 @@ export function execFileCapture(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
       reject(error);
     });
     child.on("close", code => {

@@ -1,6 +1,9 @@
 export type Stage = "plan" | "implement" | "review" | "analyze";
 export type AgentName = "claude" | "codex";
 export type StageStatus = "completed" | "failed" | "requires_codex" | "skipped";
+export type TaskMode = "sync" | "background";
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type TaskCategory = "planning" | "coding" | "review" | "analysis" | "fast" | "heavy" | string;
 
 export interface StageInput {
   stage: Stage;
@@ -12,6 +15,7 @@ export interface StageInput {
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface StageResult {
@@ -25,5 +29,21 @@ export interface StageResult {
   changedFiles: string[];
   requiresCodex: boolean;
   summary: string;
+  error?: string;
+}
+
+export interface DelegatedTask {
+  id: string;
+  mode: TaskMode;
+  status: TaskStatus;
+  workspace: string;
+  request: string;
+  stages: Stage[];
+  category?: TaskCategory;
+  preferredAgent?: AgentName;
+  runId: string;
+  createdAt: string;
+  updatedAt: string;
+  result?: unknown;
   error?: string;
 }
