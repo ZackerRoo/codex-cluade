@@ -228,6 +228,9 @@ function formatStageResult(result: StageResult): string {
 
   if (result.outputPath) lines.push(`Output: ${result.outputPath}`);
   if (result.logPath) lines.push(`Log: ${result.logPath}`);
+  if (result.agentSessionId) lines.push(`Agent session: ${result.agentSessionId}`);
+  if (result.agentTranscriptPath) lines.push(`Agent transcript: ${result.agentTranscriptPath}`);
+  if (result.resumeCommand) lines.push(`Resume: ${result.resumeCommand}`);
   if (result.changedFiles.length > 0) lines.push(`Changed files: ${result.changedFiles.join(", ")}`);
   if (result.error) lines.push(`Error: ${result.error}`);
 

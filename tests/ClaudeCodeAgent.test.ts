@@ -52,6 +52,7 @@ describe("ClaudeCodeAgent", () => {
 
   it("runs claude implement stage with full permissions", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const sessionId = "57a91bf5-6a80-43c7-93d0-4095a19b4302";
     const calls: string[][] = [];
     const agent = new ClaudeCodeAgent({
       claudePath: "claude",
@@ -59,7 +60,7 @@ describe("ClaudeCodeAgent", () => {
         calls.push(args);
         return {
           code: 0,
-          stdout: JSON.stringify({ result: "implemented" }),
+          stdout: JSON.stringify({ result: "implemented", session_id: sessionId }),
           stderr: "",
           timedOut: false
         };
@@ -77,6 +78,8 @@ describe("ClaudeCodeAgent", () => {
 
     assert.equal(result.ok, true);
     assert.equal(result.changedFiles[0], "src/example.ts");
+    assert.equal(result.agentSessionId, sessionId);
+    assert.match(result.resumeCommand ?? "", new RegExp(`claude' --resume ${sessionId}$`));
     assert.ok(calls[0].includes("--permission-mode"));
     assert.ok(calls[0].includes("bypassPermissions"));
     assert.ok(!calls[0].includes("--disallowedTools"));

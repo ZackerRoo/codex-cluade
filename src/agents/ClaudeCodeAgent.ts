@@ -4,6 +4,7 @@ import { buildStagePrompt } from "../prompts/stagePrompts.js";
 import { ResultStore } from "../storage/ResultStore.js";
 import { execFileCapture, type ExecResult } from "../utils/exec.js";
 import { changedFiles } from "../utils/git.js";
+import { resolveClaudeSessionInfo } from "./ClaudeSessionResolver.js";
 
 type ExecFn = (
   command: string,
@@ -52,6 +53,7 @@ export class ClaudeCodeAgent implements AgentProvider {
     if (input.model) args.push("--model", input.model);
     if (input.effort) args.push("--effort", input.effort);
 
+    const startedAt = new Date();
     const result = await this.exec(this.claudePath, args, {
       cwd: input.workspace,
       timeoutMs: input.timeoutMs ?? 15 * 60 * 1000,
@@ -62,6 +64,12 @@ export class ClaudeCodeAgent implements AgentProvider {
     const outputText = extractClaudeOutput(result.stdout);
     const outputPath = await store.writeStageOutput(runId, input.stage, outputText);
     const files = await this.getChangedFiles(input.workspace);
+    const session = await resolveClaudeSessionInfo({
+      workspace: input.workspace,
+      stdout: result.stdout,
+      startedAt,
+      claudePath: this.claudePath
+    });
 
     if (result.timedOut || result.code !== 0) {
       let error: string;
@@ -83,6 +91,9 @@ export class ClaudeCodeAgent implements AgentProvider {
         status: "failed",
         outputPath,
         logPath,
+        agentSessionId: session?.sessionId,
+        agentTranscriptPath: session?.transcriptPath,
+        resumeCommand: session?.resumeCommand,
         changedFiles: files,
         requiresCodex: false,
         summary: `Claude ${input.stage} failed`,
@@ -98,6 +109,9 @@ export class ClaudeCodeAgent implements AgentProvider {
       status: "completed",
       outputPath,
       logPath,
+      agentSessionId: session?.sessionId,
+      agentTranscriptPath: session?.transcriptPath,
+      resumeCommand: session?.resumeCommand,
       changedFiles: files,
       requiresCodex: false,
       summary: `Claude ${input.stage} completed`

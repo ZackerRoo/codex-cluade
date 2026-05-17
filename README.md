@@ -64,6 +64,12 @@ The bridge prints JSON that Codex can read and stores artifacts under `.agent-ru
 
 The tool returns text plus structured JSON with status, output path, log path, changed files, and errors.
 
+Claude stage results also include traceability fields when the Claude session can be resolved:
+
+- `agentSessionId`: Claude Code session id
+- `agentTranscriptPath`: local Claude transcript JSONL path
+- `resumeCommand`: command to resume the Claude session from the correct workspace
+
 `delegate_task` is the higher-level orchestration entry point inspired by Oh My OpenCode's `delegate_task` pattern:
 
 - `mode`: `sync` or `background` (default: `sync`)
@@ -85,6 +91,7 @@ Background tasks return a `taskId`. Use:
 - `agent_catalog`: list available agents, categories, and profiles
 
 Task state is in-memory for the current MCP server process. Artifacts still persist under `.agent-runs/<run-id>/`.
+Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-workspace>/<session-id>.jsonl`; the bridge surfaces the resolved path when available.
 
 ## Stage Routing
 

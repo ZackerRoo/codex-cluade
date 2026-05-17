@@ -28,6 +28,9 @@ export interface StageResult {
   status: StageStatus;
   outputPath?: string;
   logPath?: string;
+  agentSessionId?: string;
+  agentTranscriptPath?: string;
+  resumeCommand?: string;
   changedFiles: string[];
   requiresCodex: boolean;
   summary: string;
