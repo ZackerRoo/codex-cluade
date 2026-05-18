@@ -2,7 +2,7 @@ export type Stage = "plan" | "implement" | "review" | "analyze";
 export type AgentName = "claude" | "codex";
 export type StageStatus = "completed" | "failed" | "requires_codex" | "skipped";
 export type TaskMode = "sync" | "background";
-export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type TaskCategory = "planning" | "coding" | "review" | "analysis" | "fast" | "heavy" | string;
 export type AgentProfileName = "planner" | "coder" | "reviewer" | "analyst" | "quick" | "heavy-coder" | string;
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -48,6 +48,7 @@ export interface DelegatedTask {
   category?: TaskCategory;
   profile?: AgentProfileName;
   preferredAgent?: AgentName;
+  agentSessionId?: string;
   runId: string;
   createdAt: string;
   updatedAt: string;

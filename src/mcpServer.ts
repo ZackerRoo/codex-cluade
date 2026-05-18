@@ -100,7 +100,8 @@ export function createServer(): McpServer {
       description: "Read task artifacts, Claude logs, and transcript tail for a background delegated task.",
       inputSchema: {
         taskId: z.string().min(1).describe("Task id returned by delegate_task."),
-        maxBytes: z.number().positive().optional().describe("Maximum bytes to read from each output/log file.")
+        maxBytes: z.number().positive().optional().describe("Maximum bytes to read from each output/log file."),
+        cursor: z.number().nonnegative().optional().describe("Incremental output cursor returned by the previous background_output call.")
       },
       annotations: {
         title: "Background output",

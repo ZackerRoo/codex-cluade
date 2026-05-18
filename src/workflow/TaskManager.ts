@@ -1,6 +1,7 @@
 import type { AgentName, AgentProfileName, DelegatedTask, Stage, TaskCategory, TaskMode } from "../types.js";
 import type { CoordinatorResult } from "./AgentCoordinator.js";
 import { AgentCoordinator, type CoordinatorInput } from "./AgentCoordinator.js";
+import { isLiveStatus, TaskStore } from "./TaskStore.js";
 
 export interface DelegateTaskInput {
   mode: TaskMode;
@@ -33,7 +34,10 @@ interface StoredTask extends DelegatedTask {
 export class TaskManager {
   private readonly tasks = new Map<string, StoredTask>();
 
-  constructor(private readonly coordinator: AgentCoordinator) {}
+  constructor(
+    private readonly coordinator: AgentCoordinator,
+    private readonly store = new TaskStore()
+  ) {}
 
   async run(input: DelegateTaskInput): Promise<DelegateTaskResult> {
     if (input.mode === "sync") {
@@ -57,29 +61,42 @@ export class TaskManager {
 
     const task = this.createTask(input);
     this.tasks.set(task.id, task);
+    this.saveTask(task);
     void this.startBackgroundTask(task, input);
     return { mode: "background", taskId: task.id, task: publicTask(task) };
   }
 
   get(taskId: string): DelegatedTask | undefined {
     const task = this.tasks.get(taskId);
-    return task ? publicTask(task) : undefined;
+    if (task) return publicTask(task);
+    const stored = this.store.get(taskId);
+    if (!stored) return undefined;
+    return this.interruptIfOrphaned(stored);
   }
 
   list(): DelegatedTask[] {
-    return [...this.tasks.values()].map(publicTask);
+    const memoryTasks = new Map([...this.tasks.values()].map(task => [task.id, publicTask(task)]));
+    const storedTasks = this.store.list().map(task => {
+      const memoryTask = memoryTasks.get(task.id);
+      return memoryTask ?? this.interruptIfOrphaned(task);
+    });
+    for (const task of memoryTasks.values()) {
+      if (!storedTasks.some(stored => stored.id === task.id)) storedTasks.push(task);
+    }
+    return storedTasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   cancel(taskId: string): DelegatedTask | undefined {
     const task = this.tasks.get(taskId);
-    if (!task) return undefined;
-    if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+    if (!task) return this.get(taskId);
+    if (task.status === "completed" || task.status === "failed" || task.status === "cancelled" || task.status === "interrupted") {
       return publicTask(task);
     }
     task.controller.abort();
     task.status = "cancelled";
     task.updatedAt = new Date().toISOString();
     task.error = "Task cancelled";
+    this.saveTask(task);
     return publicTask(task);
   }
 
@@ -96,6 +113,7 @@ export class TaskManager {
       category: input.category,
       profile: input.profile,
       preferredAgent: input.preferredAgent,
+      agentSessionId: input.agentSessionId,
       runId: id,
       createdAt: now,
       updatedAt: now,
@@ -106,6 +124,7 @@ export class TaskManager {
   private async startBackgroundTask(task: StoredTask, input: DelegateTaskInput): Promise<void> {
     task.status = "running";
     task.updatedAt = new Date().toISOString();
+    this.saveTask(task);
     try {
       const result = await this.coordinator.run({
         workspace: input.workspace,
@@ -128,12 +147,30 @@ export class TaskManager {
       task.result = result;
       task.error = result.ok ? undefined : result.summary;
       task.updatedAt = new Date().toISOString();
+      this.saveTask(task);
     } catch (error) {
       if (isCancelled(task)) return;
       task.status = "failed";
       task.error = error instanceof Error ? error.message : String(error);
       task.updatedAt = new Date().toISOString();
+      this.saveTask(task);
     }
+  }
+
+  private interruptIfOrphaned(task: DelegatedTask): DelegatedTask {
+    if (!isLiveStatus(task.status)) return task;
+    const interrupted: DelegatedTask = {
+      ...task,
+      status: "interrupted",
+      updatedAt: new Date().toISOString(),
+      error: task.error ?? "Task interrupted because the MCP server process restarted."
+    };
+    this.store.save(interrupted);
+    return interrupted;
+  }
+
+  private saveTask(task: StoredTask): void {
+    this.store.save(publicTask(task));
   }
 }
 

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentProvider } from "../src/agents/AgentProvider.js";
 import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
 import { TaskManager } from "../src/workflow/TaskManager.js";
+import { TaskStore } from "../src/workflow/TaskStore.js";
 import type { AgentName, StageInput, StageResult } from "../src/types.js";
 
 class SlowProvider implements AgentProvider {
@@ -69,14 +73,37 @@ describe("TaskManager", () => {
     const status = manager.get(launched.taskId);
     assert.equal(status?.status, "cancelled");
   });
+
+  it("persists background tasks and marks orphaned running tasks as interrupted", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-store-"));
+    const store = new TaskStore({ rootDir: storeDir });
+    const manager = createManager(store);
+    const launched = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Implement login cache",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "persisted-run"
+    });
+
+    assert.ok(launched.taskId);
+    const restoredManager = createManager(store);
+    const restored = restoredManager.get(launched.taskId);
+
+    assert.equal(restored?.id, launched.taskId);
+    assert.equal(restored?.status, "interrupted");
+    assert.match(restored?.error ?? "", /interrupted/i);
+  });
 });
 
-function createManager(): TaskManager {
+function createManager(store?: TaskStore): TaskManager {
   const coordinator = new AgentCoordinator({
     providers: {
       claude: new SlowProvider("claude"),
       codex: new SlowProvider("codex")
     }
   });
-  return new TaskManager(coordinator);
+  return new TaskManager(coordinator, store);
 }

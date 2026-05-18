@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -158,6 +158,44 @@ describe("delegate task MCP tools", () => {
     const output = await tools.backgroundOutputTool({ taskId });
     assert.equal(output.structuredContent?.ok, true);
     assert.match(JSON.stringify(output.structuredContent), /done output/);
+  });
+
+  it("reads background output incrementally with a cursor", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-output-cursor-test-"));
+    const tools = createTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "first chunk" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const launched = await tools.delegateTaskTool({
+      mode: "background",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-cursor-run"
+    });
+    const taskId = String(launched.structuredContent?.taskId);
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const first = await tools.backgroundOutputTool({ taskId, cursor: 0 });
+    const firstCursor = Number(first.structuredContent?.nextCursor);
+    assert.ok(firstCursor > 0);
+
+    await writeFile(join(workspace, ".agent-runs", "delegate-cursor-run", "implement.output.md"), "first chunk\nsecond chunk", "utf8");
+    const second = await tools.backgroundOutputTool({ taskId, cursor: firstCursor });
+
+    assert.equal(second.structuredContent?.ok, true);
+    assert.match(JSON.stringify(second.structuredContent), /second chunk/);
+    assert.doesNotMatch(JSON.stringify(second.structuredContent), /first chunk/);
   });
 
   it("uses profiles to select stages and routing defaults", async () => {

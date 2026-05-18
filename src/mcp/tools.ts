@@ -40,6 +40,7 @@ export interface DelegateTaskArgs {
 export interface TaskLookupArgs {
   taskId: string;
   maxBytes?: number;
+  cursor?: number;
 }
 
 export interface TaskToolSet {
@@ -171,7 +172,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
       if (!args.taskId) return errorResult("taskId is required");
       const task = manager.get(args.taskId);
       if (!task) return errorResult(`Task not found: ${args.taskId}`);
-      const output = await readBackgroundOutput(task, args.maxBytes);
+      const output = await readBackgroundOutput(task, args.maxBytes, args.cursor);
       return {
         content: [{ type: "text", text: formatBackgroundOutput(output) }],
         structuredContent: { ok: true, ...output }
@@ -297,6 +298,12 @@ function formatBackgroundOutput(output: Awaited<ReturnType<typeof readBackground
   ];
   if (output.transcript) {
     lines.push(`Transcript: ${output.transcript.path}`, output.transcript.tail || "(empty)");
+  }
+  if (output.events.length > 0) {
+    lines.push("", `Incremental events: cursor ${output.cursor} -> ${output.nextCursor}`);
+    for (const event of output.events) {
+      lines.push(`Event: ${event.source} ${event.path} @${event.offset}`, event.content);
+    }
   }
   return lines.join("\n").trim();
 }

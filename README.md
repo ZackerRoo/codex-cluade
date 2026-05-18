@@ -93,8 +93,18 @@ Background tasks return a `taskId`. Use:
 - `task_cancel`: cancel a background task
 - `agent_catalog`: list available agents, categories, and profiles
 
-Task state is in-memory for the current MCP server process. Artifacts still persist under `.agent-runs/<run-id>/`.
+Task metadata is persisted under `~/.codex-claude/tasks/<taskId>.json`, so `task_status`, `task_list`, and `background_output` can inspect completed tasks after the MCP server restarts. If a saved task was `pending` or `running` when the server restarted, it is reported as `interrupted`; use its `resumeCommand` or `agentSessionId` to continue the Claude session.
+
+Artifacts still persist under `.agent-runs/<run-id>/`.
 Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-workspace>/<session-id>.jsonl`; the bridge surfaces the resolved path when available.
+
+`background_output` supports polling with a cursor:
+
+```text
+Use background_output with taskId="<task-id>", cursor=0.
+```
+
+The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility.
 
 ## Session Continuation
 
