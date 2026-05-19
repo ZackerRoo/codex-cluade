@@ -211,15 +211,15 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 .metric { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; min-height: 72px; }
 .metric span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .metric strong { display: block; margin-top: 8px; font-size: 24px; }
-.workspace { display: grid; grid-template-columns: minmax(320px, 390px) 1fr; gap: 16px; min-height: 0; }
-.task-list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-height: 0; }
+.workspace { display: grid; grid-template-columns: minmax(300px, 390px) minmax(0, 1fr); gap: 16px; min-height: 0; min-width: 0; }
+.task-list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-height: 0; min-width: 0; }
 .task-list { display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
 .list-head { padding: 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 10px; align-items: center; }
 select { border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); padding: 6px 8px; max-width: 160px; }
-.tasks { overflow: auto; }
-.task-row { width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: #fff; padding: 12px 14px; cursor: pointer; display: grid; gap: 7px; }
+.tasks { overflow-y: auto; overflow-x: hidden; }
+.task-row { width: 100%; min-width: 0; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: #fff; padding: 12px 14px; cursor: pointer; display: grid; gap: 7px; }
 .task-row:hover, .task-row.active { background: #f0fdfa; }
-.task-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.task-title { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
 .task-title strong { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status { font-size: 12px; border-radius: 999px; padding: 3px 8px; background: #eef2f7; color: var(--muted); text-transform: capitalize; }
 .status.running { background: #e0f2fe; color: #075985; }
@@ -227,7 +227,7 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .status.completed { background: #dcfce7; color: var(--ok); }
 .status.failed, .status.interrupted { background: #fee2e2; color: var(--danger); }
 .meta { color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.detail { overflow: auto; min-height: 0; }
+.detail { overflow: auto; min-height: 0; min-width: 0; }
 .empty { color: var(--muted); height: 100%; display: grid; place-items: center; text-align: center; padding: 28px; }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; background: #fff; }
