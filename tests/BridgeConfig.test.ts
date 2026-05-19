@@ -13,6 +13,7 @@ describe("loadBridgeConfig", () => {
     await writeFile(path, JSON.stringify({
       claudePath: "/tmp/claude",
       defaults: { timeoutMs: 123 },
+      concurrency: { maxRunning: 2 },
       profiles: {
         coder2: {
           description: "Custom coder",
@@ -26,6 +27,7 @@ describe("loadBridgeConfig", () => {
     const config = loadBridgeConfig(dir, { CODEX_CLAUDE_CONFIG: path });
     assert.equal(config.claudePath, "/tmp/claude");
     assert.equal(config.defaults?.timeoutMs, 123);
+    assert.equal(config.concurrency?.maxRunning, 2);
     assert.equal(config.profiles?.coder2?.agent, "claude");
   });
 });

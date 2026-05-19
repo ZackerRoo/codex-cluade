@@ -83,6 +83,7 @@ Claude stage results also include traceability fields when the Claude session ca
 - `autoCategory`: infer category and default stage from the request when no routing override is provided
 - `preferredAgent`: explicit agent override, `claude` or `codex`
 - `agentSessionId`: optional Claude Code session id to resume when a Claude stage runs
+- `loadSkills`: configured skill names to inject into the delegated prompt
 - `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
 
 Background tasks return a `taskId`. Use:
@@ -104,7 +105,7 @@ Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-
 Use background_output with taskId="<task-id>", cursor=0.
 ```
 
-The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility.
+The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline.
 
 ## Session Continuation
 
@@ -133,6 +134,17 @@ Example:
   "claudePath": "/Users/me/.local/bin/claude",
   "defaults": {
     "timeoutMs": 900000
+  },
+  "concurrency": {
+    "maxRunning": 2
+  },
+  "skills": {
+    "html-game": {
+      "content": "Build as a single self-contained index.html file. Avoid external assets."
+    },
+    "project-rules": {
+      "path": "./docs/project-rules.md"
+    }
   },
   "profiles": {
     "frontend-coder": {
@@ -167,6 +179,8 @@ Example:
 ```
 
 Permission policy precedence follows routing: `profile.permission` overrides `category.permission`; if neither is set, stage defaults apply.
+
+`concurrency.maxRunning` limits how many background tasks run at once; additional background tasks remain `pending` until a running task completes, fails, or is cancelled. `skills` entries can be injected with `delegate_task.loadSkills`, either inline with `content` or from a markdown/text file via `path`.
 
 ## Stage Routing
 

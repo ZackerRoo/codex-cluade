@@ -36,6 +36,44 @@ describe("runClaudeStageTool", () => {
     }
   });
 
+  it("injects configured skills into direct Claude stage prompts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-mcp-skill-test-"));
+    const inputs: Array<string | undefined> = [];
+    const result = await runClaudeStageTool(
+      {
+        stage: "plan",
+        workspace,
+        request: "Plan a game",
+        loadSkills: ["html-game"],
+        runId: "test-skill-run"
+      },
+      {
+        config: {
+          skills: {
+            "html-game": {
+              content: "Use a single self-contained index.html file."
+            }
+          }
+        },
+        claudePath: "claude",
+        exec: async (_command, _args, options) => {
+          inputs.push(options.input);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "plan output" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      }
+    );
+
+    assert.equal(result.isError, undefined);
+    assert.match(inputs[0] ?? "", /## Injected skills/);
+    assert.match(inputs[0] ?? "", /Use a single self-contained index\.html file/);
+  });
+
   it("returns tool errors as visible MCP results", async () => {
     const result = await runClaudeStageTool(
       {
@@ -352,5 +390,46 @@ describe("delegate task MCP tools", () => {
     assert.ok(calls[0].includes("Bash(git diff *)"));
     const disallowedIndex = calls[0].indexOf("--disallowedTools");
     assert.equal(calls[0][disallowedIndex + 1], "Write,Edit");
+  });
+
+  it("injects configured skills into delegated Claude prompts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-skill-test-"));
+    const inputs: Array<string | undefined> = [];
+    const tools = createTaskTools({
+      config: {
+        skills: {
+          "html-game": {
+            content: "Use a single self-contained index.html file."
+          }
+        }
+      },
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => {
+          inputs.push(options.input);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "implemented" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.delegateTaskTool({
+      mode: "sync",
+      stage: "implement",
+      preferredAgent: "claude",
+      workspace,
+      request: "Build a game",
+      loadSkills: ["html-game"],
+      runId: "delegate-skill-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.match(inputs[0] ?? "", /## Injected skills/);
+    assert.match(inputs[0] ?? "", /Use a single self-contained index\.html file/);
   });
 });

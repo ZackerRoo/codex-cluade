@@ -7,9 +7,18 @@ export interface BridgeConfig {
   claudePath?: string;
   categories?: Record<string, Partial<CategoryDefinition>>;
   profiles?: Record<string, Partial<AgentProfile>>;
+  skills?: Record<string, SkillConfig>;
   defaults?: {
     timeoutMs?: number;
   };
+  concurrency?: {
+    maxRunning?: number;
+  };
+}
+
+export interface SkillConfig {
+  content?: string;
+  path?: string;
 }
 
 export function loadBridgeConfig(cwd = process.cwd(), env = process.env): BridgeConfig {
@@ -39,8 +48,12 @@ function normalizeConfig(value: unknown): BridgeConfig {
     claudePath: typeof value.claudePath === "string" ? value.claudePath : undefined,
     categories: normalizeRecord(value.categories),
     profiles: normalizeRecord(value.profiles),
+    skills: normalizeRecord(value.skills),
     defaults: isRecord(value.defaults) && typeof value.defaults.timeoutMs === "number"
       ? { timeoutMs: value.defaults.timeoutMs }
+      : undefined,
+    concurrency: isRecord(value.concurrency) && typeof value.concurrency.maxRunning === "number"
+      ? { maxRunning: value.concurrency.maxRunning }
       : undefined
   };
 }

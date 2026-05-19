@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { parseClaudeTranscript, type ClaudeTranscriptSummary } from "../agents/ClaudeTranscript.js";
 import type { DelegatedTask, StageResult } from "../types.js";
 
 export interface BackgroundOutputEvent {
@@ -13,6 +14,7 @@ export interface BackgroundOutput {
   task: DelegatedTask;
   artifacts: Array<{ path: string; content: string }>;
   transcript?: { path: string; tail: string };
+  transcriptSummary?: ClaudeTranscriptSummary;
   events: BackgroundOutputEvent[];
   cursor: number;
   nextCursor: number;
@@ -22,15 +24,17 @@ export interface BackgroundOutput {
 export async function readBackgroundOutput(task: DelegatedTask, maxBytes = 12_000, cursor = 0): Promise<BackgroundOutput> {
   const transcriptPath = latestClaudeResult(task)?.agentTranscriptPath;
   const artifacts = cursor > 0 ? [] : await readArtifacts(task, maxBytes);
+  const transcriptContent = transcriptPath ? await readFileOrEmpty(transcriptPath) : "";
   const transcript = transcriptPath && cursor === 0
-    ? { path: transcriptPath, tail: await readTail(transcriptPath, maxBytes) }
+    ? { path: transcriptPath, tail: tailText(transcriptContent, maxBytes) }
     : undefined;
+  const transcriptSummary = transcriptContent ? parseClaudeTranscript(transcriptContent) : undefined;
   const eventSources = [
     ...artifactPaths(task).map(path => ({ source: "artifact" as const, path })),
     ...(transcriptPath ? [{ source: "transcript" as const, path: transcriptPath }] : [])
   ];
   const { events, nextCursor } = await readIncrementalEvents(eventSources, cursor, maxBytes);
-  return { task, artifacts, transcript, events, cursor, nextCursor, hasMore: false };
+  return { task, artifacts, transcript, transcriptSummary, events, cursor, nextCursor, hasMore: false };
 }
 
 async function readArtifacts(task: DelegatedTask, maxBytes: number): Promise<Array<{ path: string; content: string }>> {
@@ -52,10 +56,14 @@ function artifactPaths(task: DelegatedTask): string[] {
 async function readTail(path: string, maxBytes: number): Promise<string> {
   try {
     const content = await readFile(path, "utf8");
-    return content.length > maxBytes ? content.slice(-maxBytes) : content;
+    return tailText(content, maxBytes);
   } catch {
     return "";
   }
+}
+
+function tailText(content: string, maxBytes: number): string {
+  return content.length > maxBytes ? content.slice(-maxBytes) : content;
 }
 
 async function readIncrementalEvents(

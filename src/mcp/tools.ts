@@ -4,6 +4,7 @@ import { AgentRegistry } from "../agents/AgentRegistry.js";
 import { ClaudeCodeAgent } from "../agents/ClaudeCodeAgent.js";
 import { CodexAgent } from "../agents/CodexAgent.js";
 import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
+import { resolveSkills } from "../config/SkillResolver.js";
 import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
 import { TaskManager } from "../workflow/TaskManager.js";
@@ -15,9 +16,14 @@ export interface ClaudeRunStageArgs {
   request: string;
   runId?: string;
   agentSessionId?: string;
+  loadSkills?: string[];
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
+}
+
+export interface ClaudeRunStageToolOptions extends ClaudeCodeAgentOptions {
+  config?: BridgeConfig;
 }
 
 export interface DelegateTaskArgs {
@@ -32,6 +38,7 @@ export interface DelegateTaskArgs {
   preferredAgent?: AgentName;
   runId?: string;
   agentSessionId?: string;
+  loadSkills?: string[];
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   timeoutMs?: number;
@@ -54,15 +61,17 @@ export interface TaskToolSet {
 
 export async function runClaudeStageTool(
   args: ClaudeRunStageArgs,
-  options: ClaudeCodeAgentOptions = {}
+  options: ClaudeRunStageToolOptions = {}
 ): Promise<CallToolResult> {
   const validationError = validateArgs(args);
   if (validationError) return errorResult(validationError);
 
   try {
+    const { config = loadBridgeConfig(), ...agentOptions } = options;
+    const skills = await resolveSkills(args.loadSkills, config);
     const agent = new ClaudeCodeAgent({
       claudePath: process.env.CLAUDE_CODE_PATH,
-      ...options
+      ...agentOptions
     });
     const result = await agent.run({
       stage: args.stage,
@@ -73,7 +82,8 @@ export async function runClaudeStageTool(
       agentSessionId: args.agentSessionId,
       model: args.model,
       effort: args.effort,
-      timeoutMs: args.timeoutMs
+      timeoutMs: args.timeoutMs,
+      skills
     });
 
     return {
@@ -104,7 +114,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
       codex: new CodexAgent()
     }
   });
-  const manager = new TaskManager(coordinator);
+  const manager = new TaskManager(coordinator, undefined, { concurrency: config.concurrency });
 
   return {
     async delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult> {
@@ -120,6 +130,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
             : undefined
         );
         const stages = explicitStages ?? profile?.stages ?? defaultStagesForCategory(inferredCategory);
+        const skills = await resolveSkills(args.loadSkills, config);
         const result = await manager.run({
           mode: args.mode ?? "sync",
           workspace: args.workspace,
@@ -134,7 +145,8 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
           agentSessionId: args.agentSessionId,
           model: args.model,
           effort: args.effort,
-          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs
+          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
+          skills
         });
         return {
           content: [{ type: "text", text: formatDelegateResult(result) }],
@@ -299,6 +311,16 @@ function formatBackgroundOutput(output: Awaited<ReturnType<typeof readBackground
   ];
   if (output.transcript) {
     lines.push(`Transcript: ${output.transcript.path}`, output.transcript.tail || "(empty)");
+  }
+  if (output.transcriptSummary) {
+    lines.push(...[
+      "",
+      "Transcript summary",
+      output.transcriptSummary.sessionId ? `Session: ${output.transcriptSummary.sessionId}` : undefined,
+      output.transcriptSummary.models.length > 0 ? `Models: ${output.transcriptSummary.models.join(", ")}` : undefined,
+      `Tool calls: ${output.transcriptSummary.toolCalls.length}`,
+      output.transcriptSummary.fileWrites.length > 0 ? `File writes: ${output.transcriptSummary.fileWrites.join(", ")}` : undefined
+    ].filter((line): line is string => Boolean(line)));
   }
   if (output.events.length > 0) {
     lines.push("", `Incremental events: cursor ${output.cursor} -> ${output.nextCursor}`);

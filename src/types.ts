@@ -14,6 +14,11 @@ export interface PermissionPolicy {
   disallowedTools?: string[];
 }
 
+export interface InjectedSkill {
+  name: string;
+  content: string;
+}
+
 export interface StageInput {
   stage: Stage;
   agent: AgentName;
@@ -26,6 +31,7 @@ export interface StageInput {
   effort?: Effort;
   timeoutMs?: number;
   permission?: PermissionPolicy;
+  skills?: InjectedSkill[];
   signal?: AbortSignal;
 }
 

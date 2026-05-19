@@ -4,6 +4,9 @@ export function buildStagePrompt(input: StageInput): string {
   const previous = Object.entries(input.previousOutputs ?? {})
     .map(([stage, output]) => `## Previous ${stage} output\n\n${output}`)
     .join("\n\n");
+  const skills = (input.skills ?? [])
+    .map(skill => `### ${skill.name}\n\n${skill.content}`)
+    .join("\n\n");
 
   const shared = [
     `Stage: ${input.stage}`,
@@ -11,6 +14,8 @@ export function buildStagePrompt(input: StageInput): string {
     "",
     "## User request",
     input.request,
+    "",
+    skills ? `## Injected skills\n\n${skills}` : "",
     "",
     previous
   ]

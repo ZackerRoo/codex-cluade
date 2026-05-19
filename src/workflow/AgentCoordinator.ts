@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { AgentRegistry } from "../agents/AgentRegistry.js";
 import type { AgentProvider } from "../agents/AgentProvider.js";
-import type { AgentName, AgentProfileName, Effort, Stage, StageResult, TaskCategory } from "../types.js";
+import type { AgentName, AgentProfileName, Effort, InjectedSkill, Stage, StageResult, TaskCategory } from "../types.js";
 import { AgentRouter, type RoutingConfig } from "./AgentRouter.js";
 import { StageRunner } from "./StageRunner.js";
 
@@ -19,6 +19,7 @@ export interface CoordinatorInput {
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
+  skills?: InjectedSkill[];
   signal?: AbortSignal;
 }
 
@@ -85,6 +86,7 @@ export class AgentCoordinator {
         effort: input.effort ?? route.effort ?? profile?.effort,
         timeoutMs: input.timeoutMs ?? route.timeoutMs ?? profile?.timeoutMs,
         permission: route.permission ?? profile?.permission,
+        skills: input.skills,
         signal: input.signal
       });
       results.push(result);
@@ -103,6 +105,7 @@ export class AgentCoordinator {
             effort: input.effort ?? fallback.effort,
             timeoutMs: input.timeoutMs ?? fallback.timeoutMs,
             permission: fallback.permission,
+            skills: input.skills,
             signal: input.signal
           });
           results.push(result);

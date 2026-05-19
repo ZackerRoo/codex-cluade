@@ -96,14 +96,47 @@ describe("TaskManager", () => {
     assert.equal(restored?.status, "interrupted");
     assert.match(restored?.error ?? "", /interrupted/i);
   });
+
+  it("queues background tasks when max concurrency is reached", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-queue-"));
+    const store = new TaskStore({ rootDir: storeDir });
+    const manager = createManager(store, { maxRunning: 1 });
+
+    const first = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Implement first",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "queued-first"
+    });
+    const second = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Implement second",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "queued-second"
+    });
+
+    assert.equal(manager.get(first.taskId ?? "")?.status, "running");
+    assert.equal(manager.get(second.taskId ?? "")?.status, "pending");
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    assert.equal(manager.get(first.taskId ?? "")?.status, "completed");
+    assert.equal(manager.get(second.taskId ?? "")?.status, "running");
+  });
 });
 
-function createManager(store?: TaskStore): TaskManager {
+function createManager(store?: TaskStore, concurrency?: { maxRunning?: number }): TaskManager {
   const coordinator = new AgentCoordinator({
     providers: {
       claude: new SlowProvider("claude"),
       codex: new SlowProvider("codex")
     }
   });
-  return new TaskManager(coordinator, store);
+  return new TaskManager(coordinator, store, { concurrency });
 }

@@ -29,6 +29,7 @@ export function createServer(): McpServer {
         request: z.string().min(1).describe("User request or stage prompt to send to Claude Code."),
         runId: z.string().optional().describe("Optional run id for .agent-runs artifacts."),
         agentSessionId: z.string().optional().describe("Optional Claude session id to resume."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the delegated prompt."),
         model: z.string().optional().describe("Optional Claude model argument."),
         effort: effortSchema.describe("Optional Claude effort level."),
         timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
@@ -61,6 +62,7 @@ export function createServer(): McpServer {
         preferredAgent: agentSchema.describe("Explicit agent override."),
         runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
         agentSessionId: z.string().optional().describe("Optional Claude session id to resume when a Claude stage runs."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the delegated prompt."),
         model: z.string().optional().describe("Optional model argument for compatible providers."),
         effort: effortSchema.describe("Optional effort level."),
         timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")

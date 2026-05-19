@@ -1,4 +1,4 @@
-import type { AgentName, AgentProfileName, DelegatedTask, Stage, TaskCategory, TaskMode } from "../types.js";
+import type { AgentName, AgentProfileName, DelegatedTask, InjectedSkill, Stage, TaskCategory, TaskMode } from "../types.js";
 import type { CoordinatorResult } from "./AgentCoordinator.js";
 import { AgentCoordinator, type CoordinatorInput } from "./AgentCoordinator.js";
 import { isLiveStatus, TaskStore } from "./TaskStore.js";
@@ -18,6 +18,7 @@ export interface DelegateTaskInput {
   model?: string;
   effort?: CoordinatorInput["effort"];
   timeoutMs?: number;
+  skills?: InjectedSkill[];
 }
 
 export interface DelegateTaskResult {
@@ -27,8 +28,15 @@ export interface DelegateTaskResult {
   result?: CoordinatorResult;
 }
 
+export interface TaskManagerOptions {
+  concurrency?: {
+    maxRunning?: number;
+  };
+}
+
 interface StoredTask extends DelegatedTask {
   controller: AbortController;
+  input?: DelegateTaskInput;
 }
 
 export class TaskManager {
@@ -36,7 +44,8 @@ export class TaskManager {
 
   constructor(
     private readonly coordinator: AgentCoordinator,
-    private readonly store = new TaskStore()
+    private readonly store = new TaskStore(),
+    private readonly options: TaskManagerOptions = {}
   ) {}
 
   async run(input: DelegateTaskInput): Promise<DelegateTaskResult> {
@@ -54,15 +63,17 @@ export class TaskManager {
         agentSessionId: input.agentSessionId,
         model: input.model,
         effort: input.effort,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        skills: input.skills
       });
       return { mode: "sync", result };
     }
 
     const task = this.createTask(input);
+    task.input = input;
     this.tasks.set(task.id, task);
     this.saveTask(task);
-    void this.startBackgroundTask(task, input);
+    this.processQueue();
     return { mode: "background", taskId: task.id, task: publicTask(task) };
   }
 
@@ -97,6 +108,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     task.error = "Task cancelled";
     this.saveTask(task);
+    this.processQueue();
     return publicTask(task);
   }
 
@@ -140,6 +152,7 @@ export class TaskManager {
         model: input.model,
         effort: input.effort,
         timeoutMs: input.timeoutMs,
+        skills: input.skills,
         signal: task.controller.signal
       });
       if (isCancelled(task)) return;
@@ -148,12 +161,25 @@ export class TaskManager {
       task.error = result.ok ? undefined : result.summary;
       task.updatedAt = new Date().toISOString();
       this.saveTask(task);
+      this.processQueue();
     } catch (error) {
       if (isCancelled(task)) return;
       task.status = "failed";
       task.error = error instanceof Error ? error.message : String(error);
       task.updatedAt = new Date().toISOString();
       this.saveTask(task);
+      this.processQueue();
+    }
+  }
+
+  private processQueue(): void {
+    const maxRunning = this.options.concurrency?.maxRunning ?? Number.POSITIVE_INFINITY;
+    let running = [...this.tasks.values()].filter(task => task.status === "running").length;
+    for (const task of this.tasks.values()) {
+      if (running >= maxRunning) return;
+      if (task.status !== "pending" || !task.input) continue;
+      running += 1;
+      void this.startBackgroundTask(task, task.input);
     }
   }
 
@@ -185,6 +211,6 @@ function isCancelled(task: StoredTask): boolean {
 }
 
 function publicTask(task: StoredTask): DelegatedTask {
-  const { controller: _controller, ...publicFields } = task;
+  const { controller: _controller, input: _input, ...publicFields } = task;
   return publicFields;
 }
