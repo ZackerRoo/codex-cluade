@@ -107,6 +107,28 @@ Use background_output with taskId="<task-id>", cursor=0.
 
 The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline.
 
+## Dashboard
+
+The bridge includes a local read-only dashboard for inspecting persisted background tasks and Claude execution traces:
+
+```bash
+npm run dashboard
+```
+
+By default it listens on `http://127.0.0.1:8765`. You can override the host, port, and output tail size:
+
+```bash
+npm run dashboard -- --port 8787 --host 127.0.0.1 --max-bytes 48000
+```
+
+The dashboard reads the same task store used by MCP:
+
+- task state from `~/.codex-claude/tasks/*.json`
+- artifacts and logs from each workspace's `.agent-runs/<run-id>/`
+- Claude transcript summaries from the resolved `agentTranscriptPath`
+
+The first version is intentionally read-only: use MCP tools for `delegate_task`, `task_cancel`, and session continuation, and use the dashboard for monitoring task queues, output, file writes, and transcript timelines.
+
 ## Session Continuation
 
 Use `agentSessionId` to continue a prior Claude Code session from the same workspace:
