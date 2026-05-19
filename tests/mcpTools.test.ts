@@ -3,7 +3,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { createTaskTools, runClaudeStageTool } from "../src/mcp/tools.js";
+import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
+import { TaskStore } from "../src/workflow/TaskStore.js";
 
 describe("runClaudeStageTool", () => {
   it("returns structured content and text for successful Claude stages", async () => {
@@ -97,7 +98,7 @@ describe("runClaudeStageTool", () => {
 describe("delegate task MCP tools", () => {
   it("runs synchronous delegated tasks with preferred agent routing", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-delegate-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async () => ({
@@ -126,7 +127,7 @@ describe("delegate task MCP tools", () => {
 
   it("launches and cancels background delegated tasks", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-delegate-bg-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async (_command, _args, options) => {
@@ -169,7 +170,7 @@ describe("delegate task MCP tools", () => {
 
   it("reads background output artifacts", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-output-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async () => ({
@@ -200,7 +201,7 @@ describe("delegate task MCP tools", () => {
 
   it("reads background output incrementally with a cursor", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-output-cursor-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async () => ({
@@ -238,7 +239,7 @@ describe("delegate task MCP tools", () => {
 
   it("uses profiles to select stages and routing defaults", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-profile-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async (_command, _args, options) => ({
@@ -268,7 +269,7 @@ describe("delegate task MCP tools", () => {
 
   it("auto-classifies implementation requests when stage is omitted", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-auto-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       claude: {
         claudePath: "claude",
         exec: async () => ({
@@ -294,7 +295,7 @@ describe("delegate task MCP tools", () => {
   });
 
   it("lists task and agent catalog metadata", async () => {
-    const tools = createTaskTools();
+    const tools = await createTestTaskTools();
 
     const tasks = await tools.taskListTool();
     assert.equal(tasks.structuredContent?.ok, true);
@@ -306,7 +307,7 @@ describe("delegate task MCP tools", () => {
 
   it("uses external config for profile routing", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-config-test-"));
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       config: {
         profiles: {
           "custom-coder": {
@@ -346,7 +347,7 @@ describe("delegate task MCP tools", () => {
   it("applies external profile permission policy to Claude runs", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-permission-config-test-"));
     const calls: string[][] = [];
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       config: {
         profiles: {
           "review-with-bash": {
@@ -395,7 +396,7 @@ describe("delegate task MCP tools", () => {
   it("injects configured skills into delegated Claude prompts", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-skill-test-"));
     const inputs: Array<string | undefined> = [];
-    const tools = createTaskTools({
+    const tools = await createTestTaskTools({
       config: {
         skills: {
           "html-game": {
@@ -433,3 +434,11 @@ describe("delegate task MCP tools", () => {
     assert.match(inputs[0] ?? "", /Use a single self-contained index\.html file/);
   });
 });
+
+async function createTestTaskTools(options: Parameters<typeof createTaskTools>[0] = {}): Promise<TaskToolSet> {
+  const rootDir = await mkdtemp(join(tmpdir(), "bridge-mcp-task-store-"));
+  return createTaskTools({
+    ...options,
+    taskStore: new TaskStore({ rootDir })
+  });
+}

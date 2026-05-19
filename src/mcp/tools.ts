@@ -8,6 +8,7 @@ import { resolveSkills } from "../config/SkillResolver.js";
 import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
 import { TaskManager } from "../workflow/TaskManager.js";
+import type { TaskStore } from "../workflow/TaskStore.js";
 import { readBackgroundOutput } from "./backgroundOutput.js";
 
 export interface ClaudeRunStageArgs {
@@ -101,7 +102,7 @@ export async function runClaudeStageTool(
   }
 }
 
-export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; config?: BridgeConfig } = {}): TaskToolSet {
+export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; config?: BridgeConfig; taskStore?: TaskStore } = {}): TaskToolSet {
   const config = options.config ?? loadBridgeConfig();
   const registry = new AgentRegistry(config);
   const coordinator = new AgentCoordinator({
@@ -114,7 +115,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
       codex: new CodexAgent()
     }
   });
-  const manager = new TaskManager(coordinator, undefined, { concurrency: config.concurrency });
+  const manager = new TaskManager(coordinator, options.taskStore, { concurrency: config.concurrency });
 
   return {
     async delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult> {

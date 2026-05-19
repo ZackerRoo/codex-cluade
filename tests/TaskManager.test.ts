@@ -53,7 +53,8 @@ describe("TaskManager", () => {
   });
 
   it("starts, reports, and cancels background tasks", async () => {
-    const manager = createManager();
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-store-"));
+    const manager = createManager(new TaskStore({ rootDir: storeDir }));
     const launched = await manager.run({
       mode: "background",
       workspace: "/tmp/project",
