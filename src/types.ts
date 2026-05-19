@@ -6,6 +6,13 @@ export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cance
 export type TaskCategory = "planning" | "coding" | "review" | "analysis" | "fast" | "heavy" | string;
 export type AgentProfileName = "planner" | "coder" | "reviewer" | "analyst" | "quick" | "heavy-coder" | string;
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ClaudePermissionMode = "acceptEdits" | "auto" | "bypassPermissions" | "default" | "dontAsk" | "plan";
+
+export interface PermissionPolicy {
+  mode?: ClaudePermissionMode;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+}
 
 export interface StageInput {
   stage: Stage;
@@ -18,6 +25,7 @@ export interface StageInput {
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
+  permission?: PermissionPolicy;
   signal?: AbortSignal;
 }
 

@@ -1,4 +1,4 @@
-import type { AgentName, AgentProfileName, Effort, Stage, TaskCategory } from "../types.js";
+import type { AgentName, AgentProfileName, Effort, PermissionPolicy, Stage, TaskCategory } from "../types.js";
 import type { BridgeConfig } from "../config/BridgeConfig.js";
 
 export interface AgentDefinition {
@@ -14,6 +14,7 @@ export interface CategoryDefinition {
   agent: AgentName;
   model?: string;
   effort?: Effort;
+  permission?: PermissionPolicy;
   fallbacks?: AgentRouteCandidate[];
 }
 
@@ -22,6 +23,7 @@ export interface AgentRouteCandidate {
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
+  permission?: PermissionPolicy;
 }
 
 export interface AgentProfile {
@@ -33,6 +35,7 @@ export interface AgentProfile {
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
+  permission?: PermissionPolicy;
   fallbacks?: AgentRouteCandidate[];
 }
 

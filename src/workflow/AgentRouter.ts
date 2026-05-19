@@ -1,6 +1,6 @@
 import { AgentRegistry } from "../agents/AgentRegistry.js";
 import type { AgentRouteCandidate } from "../agents/AgentRegistry.js";
-import type { AgentName, AgentProfileName, Effort, Stage, TaskCategory } from "../types.js";
+import type { AgentName, AgentProfileName, Effort, PermissionPolicy, Stage, TaskCategory } from "../types.js";
 
 export type RoutingConfig = Partial<Record<Stage, AgentName>>;
 export interface RoutingContext {
@@ -15,6 +15,7 @@ export interface AgentRoute {
   model?: string;
   effort?: Effort;
   timeoutMs?: number;
+  permission?: PermissionPolicy;
   fallbacks?: AgentRouteCandidate[];
 }
 
@@ -44,6 +45,7 @@ export class AgentRouter {
           model: profile.model,
           effort: profile.effort,
           timeoutMs: profile.timeoutMs,
+          permission: profile.permission,
           fallbacks: profile.fallbacks
         };
       }
@@ -56,6 +58,7 @@ export class AgentRouter {
           category: category.name,
           model: category.model,
           effort: category.effort,
+          permission: category.permission,
           fallbacks: category.fallbacks
         };
       }

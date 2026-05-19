@@ -30,11 +30,13 @@ export interface CoordinatorResult {
 }
 
 export class AgentCoordinator {
-  private readonly registry = new AgentRegistry();
-  private readonly router = new AgentRouter(this.registry);
+  private readonly registry: AgentRegistry;
+  private readonly router: AgentRouter;
   private readonly runner: StageRunner;
 
-  constructor(options: { providers: Record<AgentName, AgentProvider> }) {
+  constructor(options: { providers: Record<AgentName, AgentProvider>; registry?: AgentRegistry }) {
+    this.registry = options.registry ?? new AgentRegistry();
+    this.router = new AgentRouter(this.registry);
     this.runner = new StageRunner(options.providers);
   }
 
@@ -82,6 +84,7 @@ export class AgentCoordinator {
         model: input.model ?? route.model ?? profile?.model,
         effort: input.effort ?? route.effort ?? profile?.effort,
         timeoutMs: input.timeoutMs ?? route.timeoutMs ?? profile?.timeoutMs,
+        permission: route.permission ?? profile?.permission,
         signal: input.signal
       });
       results.push(result);
@@ -99,6 +102,7 @@ export class AgentCoordinator {
             model: input.model ?? fallback.model,
             effort: input.effort ?? fallback.effort,
             timeoutMs: input.timeoutMs ?? fallback.timeoutMs,
+            permission: fallback.permission,
             signal: input.signal
           });
           results.push(result);

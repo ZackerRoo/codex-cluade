@@ -95,6 +95,7 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
   const config = options.config ?? loadBridgeConfig();
   const registry = new AgentRegistry(config);
   const coordinator = new AgentCoordinator({
+    registry,
     providers: {
       claude: new ClaudeCodeAgent({
         claudePath: process.env.CLAUDE_CODE_PATH ?? config.claudePath,

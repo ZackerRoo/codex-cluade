@@ -142,6 +142,11 @@ Example:
       "stages": ["implement"],
       "effort": "high",
       "timeoutMs": 900000,
+      "permission": {
+        "mode": "bypassPermissions",
+        "allowedTools": ["Bash(npm test *)", "Read"],
+        "disallowedTools": ["NotebookEdit"]
+      },
       "fallbacks": [{ "agent": "codex" }]
     }
   },
@@ -150,11 +155,18 @@ Example:
       "description": "Frontend implementation work",
       "agent": "claude",
       "effort": "high",
+      "permission": {
+        "mode": "default",
+        "allowedTools": ["Bash(git diff *)"],
+        "disallowedTools": ["Write", "Edit"]
+      },
       "fallbacks": [{ "agent": "codex" }]
     }
   }
 }
 ```
+
+Permission policy precedence follows routing: `profile.permission` overrides `category.permission`; if neither is set, stage defaults apply.
 
 ## Stage Routing
 
@@ -195,6 +207,7 @@ Routing precedence is: `preferredAgent` > `profile` > `category` > explicit per-
 - Claude Code runs only in the provided workspace.
 - `plan`, `review`, and `analyze` use Claude permission mode `default` with edit tools disabled.
 - `implement` uses Claude permission mode `bypassPermissions` so Claude Code can run implementation commands without permission prompts.
+- Profiles and categories can override Claude `permission.mode`, `allowedTools`, and `disallowedTools` in config.
 - The bridge never commits.
 - The bridge records prompts, outputs, logs, and changed files.
 

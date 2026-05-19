@@ -304,4 +304,53 @@ describe("delegate task MCP tools", () => {
     const structured = result.structuredContent as { result?: { results?: Array<{ agent?: string; stage?: string }> } };
     assert.equal(structured.result?.results?.[0]?.agent, "claude");
   });
+
+  it("applies external profile permission policy to Claude runs", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-permission-config-test-"));
+    const calls: string[][] = [];
+    const tools = createTaskTools({
+      config: {
+        profiles: {
+          "review-with-bash": {
+            description: "Claude review with limited bash",
+            category: "review",
+            agent: "claude",
+            stages: ["review"],
+            permission: {
+              mode: "default",
+              allowedTools: ["Bash(git diff *)"],
+              disallowedTools: ["Write", "Edit"]
+            }
+          }
+        }
+      },
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, args) => {
+          calls.push(args);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "reviewed" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.delegateTaskTool({
+      mode: "sync",
+      profile: "review-with-bash",
+      workspace,
+      request: "Review current diff",
+      runId: "delegate-permission-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.ok(calls[0].includes("--allowedTools"));
+    assert.ok(calls[0].includes("Bash(git diff *)"));
+    const disallowedIndex = calls[0].indexOf("--disallowedTools");
+    assert.equal(calls[0][disallowedIndex + 1], "Write,Edit");
+  });
 });

@@ -117,6 +117,46 @@ describe("ClaudeCodeAgent", () => {
     assert.equal(calls[0][resumeIndex + 1], sessionId);
   });
 
+  it("uses explicit permission policy when provided", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const calls: string[][] = [];
+    const agent = new ClaudeCodeAgent({
+      claudePath: "claude",
+      exec: async (_command: string, args: string[]) => {
+        calls.push(args);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ result: "planned" }),
+          stderr: "",
+          timedOut: false
+        };
+      },
+      getChangedFiles: async () => []
+    });
+
+    await agent.run({
+      stage: "plan",
+      agent: "claude",
+      workspace,
+      request: "Plan with read tools",
+      runId: "2026-05-16-permissions",
+      permission: {
+        mode: "bypassPermissions",
+        allowedTools: ["Bash(ls *)"],
+        disallowedTools: ["Write"]
+      }
+    });
+
+    const permissionIndex = calls[0].indexOf("--permission-mode");
+    assert.equal(calls[0][permissionIndex + 1], "bypassPermissions");
+    const allowedIndex = calls[0].indexOf("--allowedTools");
+    assert.notEqual(allowedIndex, -1);
+    assert.equal(calls[0][allowedIndex + 1], "Bash(ls *)");
+    const disallowedIndex = calls[0].indexOf("--disallowedTools");
+    assert.notEqual(disallowedIndex, -1);
+    assert.equal(calls[0][disallowedIndex + 1], "Write");
+  });
+
   it("returns explicit error when claude exits non-zero with empty stdout and stderr", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
     const agent = new ClaudeCodeAgent({

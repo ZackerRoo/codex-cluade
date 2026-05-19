@@ -36,7 +36,10 @@ export class ClaudeCodeAgent implements AgentProvider {
     const prompt = buildStagePrompt({ ...input, runId });
     await store.writeStageInput(runId, input.stage, prompt);
     const logPath = await store.writeLog(runId, `claude-${input.stage}.log`, "");
-    const permissionMode = input.stage === "implement" ? "bypassPermissions" : "default";
+    const defaultDisallowedTools = input.stage === "implement" ? [] : ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+    const permissionMode = input.permission?.mode ?? (input.stage === "implement" ? "bypassPermissions" : "default");
+    const allowedTools = input.permission?.allowedTools ?? [];
+    const disallowedTools = input.permission?.disallowedTools ?? defaultDisallowedTools;
     const args = [
       "-p",
       "--output-format",
@@ -49,8 +52,11 @@ export class ClaudeCodeAgent implements AgentProvider {
     if (input.agentSessionId) {
       args.push("--resume", input.agentSessionId);
     }
-    if (input.stage !== "implement") {
-      args.push("--disallowedTools", "Edit,MultiEdit,Write,NotebookEdit");
+    if (allowedTools.length > 0) {
+      args.push("--allowedTools", allowedTools.join(","));
+    }
+    if (disallowedTools.length > 0) {
+      args.push("--disallowedTools", disallowedTools.join(","));
     }
 
     if (input.model) args.push("--model", input.model);
