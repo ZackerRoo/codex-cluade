@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AddressInfo } from "node:net";
 import { readBackgroundOutput } from "../mcp/backgroundOutput.js";
+import type { CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, TaskToolSet } from "../mcp/tools.js";
 import type { DelegatedTask, TaskStatus } from "../types.js";
 import type { TaskManager } from "../workflow/TaskManager.js";
 import { TaskStore } from "../workflow/TaskStore.js";
@@ -10,6 +11,7 @@ export interface DashboardOptions {
   port?: number;
   taskStore?: TaskStore;
   taskManager?: TaskManager;
+  taskTools?: TaskToolSet;
   maxBytes?: number;
 }
 
@@ -21,11 +23,12 @@ export interface DashboardListener {
 export function createDashboardServer(options: DashboardOptions = {}): Server {
   const taskStore = options.taskStore ?? new TaskStore();
   const taskManager = options.taskManager;
+  const taskTools = options.taskTools;
   const maxBytes = options.maxBytes ?? 24_000;
 
   return createServer(async (request, response) => {
     try {
-      await routeRequest(request, response, { taskStore, taskManager, maxBytes });
+      await routeRequest(request, response, { taskStore, taskManager, taskTools, maxBytes });
     } catch (error) {
       sendJson(response, 500, {
         ok: false,
@@ -54,7 +57,7 @@ export async function listenDashboard(options: DashboardOptions = {}): Promise<D
 async function routeRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  context: { taskStore: TaskStore; taskManager?: TaskManager; maxBytes: number }
+  context: { taskStore: TaskStore; taskManager?: TaskManager; taskTools?: TaskToolSet; maxBytes: number }
 ): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method !== "GET" && request.method !== "POST") {
@@ -82,6 +85,41 @@ async function routeRequest(
       summary: summarizeTasks(tasks),
       tasks: tasks.map(taskListItem)
     });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/capabilities") {
+    sendJson(response, 200, {
+      ok: true,
+      liveTaskManager: Boolean(context.taskManager),
+      liveTaskTools: Boolean(context.taskTools)
+    });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/delegate-task") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.delegateTaskTool(await readJsonBody(request) as unknown as DelegateTaskArgs);
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/create-plan") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.createPlanTool(await readJsonBody(request) as unknown as CreatePlanArgs);
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/execute-plan") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.executePlanTool(await readJsonBody(request) as unknown as ExecutePlanArgs);
+    sendToolResult(response, result);
     return;
   }
   if (url.pathname.startsWith("/api/tasks/")) {
@@ -148,6 +186,33 @@ function taskListItem(task: DelegatedTask): DelegatedTask & { durationMs: number
   };
 }
 
+async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  if (chunks.length === 0) return {};
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (!text.trim()) return {};
+  const parsed = JSON.parse(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Request body must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function sendToolResult(response: ServerResponse, result: { structuredContent?: unknown; isError?: boolean; content?: unknown }): void {
+  sendJson(response, result.isError ? 400 : 200, {
+    ok: result.isError ? false : true,
+    ...asRecord(result.structuredContent),
+    content: result.content
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
   sendText(response, statusCode, "application/json; charset=utf-8", JSON.stringify(body, null, 2));
 }
@@ -180,6 +245,35 @@ const DASHBOARD_HTML = `<!doctype html>
         <p id="updated">Loading task store</p>
       </div>
       <button id="refresh" type="button" title="Refresh tasks">Refresh</button>
+    </section>
+    <section class="new-task" id="workflow-panel" hidden>
+      <div class="tabbar" role="tablist" aria-label="New workflow">
+        <button class="tab active" type="button" data-tab="delegate">Delegate Task</button>
+        <button class="tab" type="button" data-tab="create-plan">Create Plan</button>
+        <button class="tab" type="button" data-tab="execute-plan">Execute Plan</button>
+      </div>
+      <form id="workflow-form" class="workflow-form">
+        <label>Workspace<input id="workflow-workspace" name="workspace" placeholder="/absolute/path/to/project" required></label>
+        <label class="request-field">Request<textarea id="workflow-request" name="request" rows="3" placeholder="Describe the work"></textarea></label>
+        <div class="form-row" id="delegate-fields">
+          <label>Stage<select id="workflow-stage" name="stage"><option value="implement">implement</option><option value="plan">plan</option><option value="review">review</option><option value="analyze">analyze</option></select></label>
+          <label>Profile<input id="workflow-profile" name="profile" placeholder="coder"></label>
+          <label>Mode<select id="workflow-mode" name="mode"><option value="background">background</option><option value="sync">sync</option></select></label>
+        </div>
+        <div class="form-row" id="plan-fields" hidden>
+          <label>Plan ID<input id="workflow-plan-id" name="planId" placeholder="optional"></label>
+          <label>Planner Profile<input id="workflow-planner-profile" name="plannerProfile" placeholder="optional"></label>
+        </div>
+        <div class="form-row" id="execute-fields" hidden>
+          <label>Plan ID<input id="workflow-execute-plan-id" name="executePlanId" placeholder="plan id"></label>
+          <label>Plan Path<input id="workflow-plan-path" name="planPath" placeholder="or path"></label>
+          <label>Executor Profile<input id="workflow-executor-profile" name="executorProfile" placeholder="coder"></label>
+        </div>
+        <div class="form-actions">
+          <button id="workflow-submit" type="submit">Run</button>
+          <span id="workflow-status" class="form-status"></span>
+        </div>
+      </form>
     </section>
     <section class="metrics" id="metrics"></section>
     <section class="workspace">
@@ -235,6 +329,19 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 #updated { color: var(--muted); margin-top: 6px; font-size: 13px; }
 #refresh { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 8px 12px; cursor: pointer; }
 #refresh:hover { border-color: var(--accent); }
+.new-task { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.tabbar { display: flex; gap: 6px; margin-bottom: 12px; }
+.tab { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.tab.active { background: #ccfbf1; border-color: var(--accent); color: #115e59; }
+.workflow-form { display: grid; gap: 10px; }
+.workflow-form label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 12px; }
+.workflow-form input, .workflow-form textarea, .workflow-form select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px; color: var(--text); background: #fff; }
+.workflow-form textarea { resize: vertical; min-height: 72px; }
+.request-field { grid-column: 1 / -1; }
+.form-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.form-actions { display: flex; align-items: center; gap: 10px; }
+#workflow-submit { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+.form-status { color: var(--muted); font-size: 13px; }
 .metrics { display: grid; grid-template-columns: repeat(7, minmax(92px, 1fr)); gap: 10px; }
 .metric { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; min-height: 72px; }
 .metric span { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; }
@@ -270,21 +377,39 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   .shell { padding: 12px; }
+  .form-row { grid-template-columns: 1fr; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workspace { grid-template-columns: 1fr; grid-template-rows: 360px minmax(420px, 1fr); }
   .detail-grid { grid-template-columns: 1fr; }
 }`;
 
-const DASHBOARD_JS = `const state = { tasks: [], selectedTaskId: undefined, filter: "" };
+const DASHBOARD_JS = `const state = { tasks: [], selectedTaskId: undefined, filter: "", capabilities: { liveTaskManager: false, liveTaskTools: false } };
 
 const els = {
+  workflowPanel: document.getElementById("workflow-panel"),
   metrics: document.getElementById("metrics"),
   tasks: document.getElementById("tasks"),
   detail: document.getElementById("detail"),
   empty: document.getElementById("detail-empty"),
   updated: document.getElementById("updated"),
   refresh: document.getElementById("refresh"),
-  filter: document.getElementById("status-filter")
+  filter: document.getElementById("status-filter"),
+  form: document.getElementById("workflow-form"),
+  submit: document.getElementById("workflow-submit"),
+  formStatus: document.getElementById("workflow-status"),
+  workspace: document.getElementById("workflow-workspace"),
+  request: document.getElementById("workflow-request"),
+  stage: document.getElementById("workflow-stage"),
+  profile: document.getElementById("workflow-profile"),
+  mode: document.getElementById("workflow-mode"),
+  planId: document.getElementById("workflow-plan-id"),
+  plannerProfile: document.getElementById("workflow-planner-profile"),
+  executePlanId: document.getElementById("workflow-execute-plan-id"),
+  planPath: document.getElementById("workflow-plan-path"),
+  executorProfile: document.getElementById("workflow-executor-profile"),
+  delegateFields: document.getElementById("delegate-fields"),
+  planFields: document.getElementById("plan-fields"),
+  executeFields: document.getElementById("execute-fields")
 };
 
 els.refresh.addEventListener("click", () => loadTasks());
@@ -292,6 +417,71 @@ els.filter.addEventListener("change", event => {
   state.filter = event.target.value;
   renderTasks();
 });
+els.form.addEventListener("submit", event => {
+  event.preventDefault();
+  submitWorkflow();
+});
+for (const tab of document.querySelectorAll("[data-tab]")) {
+  tab.addEventListener("click", () => setTab(tab.dataset.tab));
+}
+
+function setTab(tab) {
+  state.tab = tab;
+  for (const button of document.querySelectorAll("[data-tab]")) {
+    button.classList.toggle("active", button.dataset.tab === tab);
+  }
+  els.delegateFields.hidden = tab !== "delegate";
+  els.planFields.hidden = tab !== "create-plan";
+  els.executeFields.hidden = tab !== "execute-plan";
+  els.request.required = tab !== "execute-plan";
+  els.submit.textContent = tab === "create-plan" ? "Create plan" : tab === "execute-plan" ? "Execute plan" : "Delegate task";
+  els.formStatus.textContent = "";
+}
+
+async function submitWorkflow() {
+  const tab = state.tab || "delegate";
+  const workspace = els.workspace.value.trim();
+  const request = els.request.value.trim();
+  const body = { workspace };
+  let endpoint = "/api/delegate-task";
+  if (tab === "delegate") {
+    endpoint = "/api/delegate-task";
+    body.request = request;
+    body.mode = els.mode.value;
+    body.stage = els.stage.value;
+    body.profile = els.profile.value.trim() || undefined;
+  } else if (tab === "create-plan") {
+    endpoint = "/api/create-plan";
+    body.request = request;
+    body.planId = els.planId.value.trim() || undefined;
+    body.plannerProfile = els.plannerProfile.value.trim() || undefined;
+  } else {
+    endpoint = "/api/execute-plan";
+    body.mode = els.mode.value || "background";
+    body.request = request || undefined;
+    body.planId = els.executePlanId.value.trim() || undefined;
+    body.planPath = els.planPath.value.trim() || undefined;
+    body.executorProfile = els.executorProfile.value.trim() || undefined;
+  }
+  els.formStatus.textContent = "Running...";
+  els.submit.disabled = true;
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Request failed");
+    els.formStatus.textContent = data.taskId ? "Task " + data.taskId + " created" : data.planId ? "Plan " + data.planId + " created" : "Done";
+    await loadTasks();
+    if (data.taskId) await loadDetail(data.taskId);
+  } catch (error) {
+    els.formStatus.textContent = error.message || String(error);
+  } finally {
+    els.submit.disabled = false;
+  }
+}
 
 async function loadTasks() {
   const response = await fetch("/api/tasks");
@@ -301,6 +491,13 @@ async function loadTasks() {
   renderMetrics(data.summary || {});
   renderTasks();
   if (state.selectedTaskId) await loadDetail(state.selectedTaskId);
+}
+
+async function loadCapabilities() {
+  const response = await fetch("/api/capabilities");
+  const data = await response.json();
+  state.capabilities = data;
+  els.workflowPanel.hidden = !data.liveTaskTools;
 }
 
 function renderMetrics(summary) {
@@ -358,7 +555,7 @@ async function cancelTask(taskId) {
 
 function renderDetail(task, output) {
   const summary = output.transcriptSummary;
-  const canCancel = task.status === "running" || task.status === "pending";
+  const canCancel = state.capabilities.liveTaskManager && (task.status === "running" || task.status === "pending");
   els.empty.hidden = true;
   els.detail.hidden = false;
   els.detail.innerHTML = \`
@@ -413,5 +610,5 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(new RegExp(String.fromCharCode(96), "g"), "&#96;");
 }
 
-loadTasks();
+loadCapabilities().then(loadTasks);
 setInterval(loadTasks, 3000);`;

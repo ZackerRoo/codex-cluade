@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { createDashboardServer } from "../src/dashboard/server.js";
+import { createTaskManager, createTaskTools } from "../src/mcp/tools.js";
 import type { AgentName, DelegatedTask, StageInput, StageResult } from "../src/types.js";
 import type { AgentProvider } from "../src/agents/AgentProvider.js";
 import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
@@ -100,6 +101,52 @@ describe("dashboard server", () => {
       assert.equal(response.status, 200);
       assert.equal(data.ok, true);
       assert.equal(data.task?.status, "cancelled");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("creates plans and delegated tasks through live dashboard APIs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-tools-store-"));
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-dashboard-tools-workspace-"));
+    const store = new TaskStore({ rootDir: root });
+    const claude = {
+      claudePath: "claude",
+      exec: async () => ({
+        code: 0,
+        stdout: JSON.stringify({ result: "Create index.html" }),
+        stderr: "",
+        timedOut: false
+      }),
+      getChangedFiles: async () => []
+    };
+    const manager = createTaskManager({ taskStore: store, claude });
+    const tools = createTaskTools({
+      taskManager: manager,
+      claude
+    });
+    const liveServer = createDashboardServer({ taskManager: manager, taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      const planResponse = await fetch(`${liveBaseUrl}/api/create-plan`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace, request: "Build hello", planId: "dashboard-plan" })
+      });
+      const plan = await planResponse.json() as { ok?: boolean; planId?: string; planPath?: string };
+      assert.equal(planResponse.status, 200);
+      assert.equal(plan.ok, true);
+      assert.equal(plan.planId, "dashboard-plan");
+
+      const taskResponse = await fetch(`${liveBaseUrl}/api/delegate-task`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace, request: "Build hello", mode: "background", stage: "implement", preferredAgent: "claude", runId: "dashboard-created-task" })
+      });
+      const task = await taskResponse.json() as { ok?: boolean; taskId?: string };
+      assert.equal(taskResponse.status, 200);
+      assert.equal(task.ok, true);
+      assert.equal(task.taskId, "dashboard-created-task");
     } finally {
       await new Promise<void>(resolve => liveServer.close(() => resolve()));
     }

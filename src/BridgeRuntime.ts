@@ -36,6 +36,9 @@ export class BridgeRuntime {
   }
 
   createDashboardHttpServer(): ReturnType<typeof createDashboardServer> {
-    return createDashboardServer({ taskManager: this.taskManager });
+    return createDashboardServer({
+      taskManager: this.taskManager,
+      taskTools: this.taskTools
+    });
   }
 }

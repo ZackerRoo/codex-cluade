@@ -176,7 +176,14 @@ For live task control, run the unified MCP + Dashboard runtime:
 npm run mcp-dashboard -- --port 8787
 ```
 
-In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboard can cancel currently `pending` or `running` tasks. The shared runtime writes its Dashboard URL to stderr so MCP stdout stays protocol-clean.
+In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboard can:
+
+- create a normal delegated task
+- create a saved implementation plan
+- execute a saved plan
+- cancel currently `pending` or `running` tasks
+
+The shared runtime writes its Dashboard URL to stderr so MCP stdout stays protocol-clean. The task creation panel is hidden when running the standalone read-only dashboard.
 
 ## Session Continuation
 
