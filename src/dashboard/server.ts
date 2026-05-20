@@ -138,6 +138,17 @@ async function routeRequest(
       sendJson(response, 200, { ok: true, task });
       return;
     }
+    if (request.method === "POST" && (parts[1] === "retry" || parts[1] === "resume")) {
+      if (!context.taskTools) {
+        sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+        return;
+      }
+      const result = parts[1] === "retry"
+        ? await context.taskTools.taskRetryTool({ taskId })
+        : await context.taskTools.taskResumeTool({ taskId });
+      sendToolResult(response, result);
+      return;
+    }
     if (request.method !== "GET" || parts.length !== 1) {
       sendJson(response, 404, { ok: false, error: "Not found" });
       return;
@@ -369,6 +380,8 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .actions { display: flex; gap: 8px; margin-top: 12px; }
 .danger-button { border: 1px solid #fecaca; background: #fff1f2; color: var(--danger); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
 .danger-button:hover { border-color: var(--danger); }
+.secondary-button { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.secondary-button:hover { border-color: var(--accent); }
 .progress-track { height: 8px; background: #eef2f7; border-radius: 999px; overflow: hidden; margin: 10px 0; }
 .progress-fill { height: 100%; background: var(--accent); }
 .checklist { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
@@ -559,10 +572,23 @@ async function cancelTask(taskId) {
   await loadDetail(taskId);
 }
 
+async function rerunTask(taskId, action) {
+  const response = await fetch("/api/tasks/" + encodeURIComponent(taskId) + "/" + action, { method: "POST" });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Task action failed");
+    return;
+  }
+  await loadTasks();
+  if (data.taskId) await loadDetail(data.taskId);
+}
+
 function renderDetail(task, output) {
   const summary = output.transcriptSummary;
   const plan = output.planSummary;
   const canCancel = state.capabilities.liveTaskManager && (task.status === "running" || task.status === "pending");
+  const canRetry = state.capabilities.liveTaskTools && ["failed", "interrupted", "cancelled"].includes(task.status);
+  const canResume = canRetry && Boolean(task.agentSessionId || summary?.sessionId);
   els.empty.hidden = true;
   els.detail.hidden = false;
   els.detail.innerHTML = \`
@@ -576,9 +602,15 @@ function renderDetail(task, output) {
         \${kv("Stages", (task.stages || []).join(" -> "))}
         \${kv("Plan", task.planId || "")}
         \${kv("Plan path", task.planPath || "")}
+        \${kv("Retry of", task.retryOf || "")}
+        \${kv("Resume of", task.resumeOf || "")}
         \${kv("Profile", task.profile || "")}
         \${kv("Category", task.category || "")}
-        \${canCancel ? '<div class="actions"><button class="danger-button" type="button" data-cancel-task="' + escapeAttr(task.id) + '">Cancel task</button></div>' : ''}
+        \${canCancel || canRetry || canResume ? '<div class="actions">' +
+          (canCancel ? '<button class="danger-button" type="button" data-cancel-task="' + escapeAttr(task.id) + '">Cancel task</button>' : '') +
+          (canRetry ? '<button class="secondary-button" type="button" data-retry-task="' + escapeAttr(task.id) + '">Retry</button>' : '') +
+          (canResume ? '<button class="secondary-button" type="button" data-resume-task="' + escapeAttr(task.id) + '">Resume</button>' : '') +
+          '</div>' : ''}
       </div>
       <div class="panel">
         <h3>Claude</h3>
@@ -604,6 +636,10 @@ function renderDetail(task, output) {
   \`;
   const cancelButton = els.detail.querySelector("[data-cancel-task]");
   if (cancelButton) cancelButton.addEventListener("click", () => cancelTask(task.id));
+  const retryButton = els.detail.querySelector("[data-retry-task]");
+  if (retryButton) retryButton.addEventListener("click", () => rerunTask(task.id, "retry"));
+  const resumeButton = els.detail.querySelector("[data-resume-task]");
+  if (resumeButton) resumeButton.addEventListener("click", () => rerunTask(task.id, "resume"));
 }
 
 function renderPlanSummary(plan) {

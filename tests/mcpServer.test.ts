@@ -25,6 +25,8 @@ describe("mcpServer", () => {
       assert.ok(tools.tools.some(tool => tool.name === "task_list"));
       assert.ok(tools.tools.some(tool => tool.name === "agent_catalog"));
       assert.ok(tools.tools.some(tool => tool.name === "task_cancel"));
+      assert.ok(tools.tools.some(tool => tool.name === "task_retry"));
+      assert.ok(tools.tools.some(tool => tool.name === "task_resume"));
     } finally {
       await client.close();
     }

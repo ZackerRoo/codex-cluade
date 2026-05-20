@@ -222,6 +222,42 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
     async args => taskTools.taskCancelTool(args)
   );
 
+  server.registerTool(
+    "task_retry",
+    {
+      title: "Retry task",
+      description: "Start a fresh background retry from a previous delegated task.",
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id to retry.")
+      },
+      annotations: {
+        title: "Retry task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.taskRetryTool(args)
+  );
+
+  server.registerTool(
+    "task_resume",
+    {
+      title: "Resume task",
+      description: "Start a background retry that resumes the latest Claude session from a previous task.",
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id to resume from.")
+      },
+      annotations: {
+        title: "Resume task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.taskResumeTool(args)
+  );
+
   return server;
 }
 

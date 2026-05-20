@@ -65,6 +65,8 @@ export interface DelegatedTask {
   agentSessionId?: string;
   planId?: string;
   planPath?: string;
+  retryOf?: string;
+  resumeOf?: string;
   runId: string;
   createdAt: string;
   updatedAt: string;

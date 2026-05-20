@@ -87,6 +87,8 @@ export interface TaskToolSet {
   executePlanTool(args: ExecutePlanArgs): Promise<CallToolResult>;
   taskStatusTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskCancelTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  taskRetryTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  taskResumeTool(args: TaskLookupArgs): Promise<CallToolResult>;
   backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskListTool(): Promise<CallToolResult>;
   agentCatalogTool(): Promise<CallToolResult>;
@@ -287,6 +289,32 @@ export function createTaskTools(options: {
       return {
         content: [{ type: "text", text: formatTask(task) }],
         structuredContent: { ok: true, ...task }
+      };
+    },
+
+    async taskRetryTool(args: TaskLookupArgs): Promise<CallToolResult> {
+      if (!args.taskId) return errorResult("taskId is required");
+      const result = await manager.retry(args.taskId);
+      if (!result) return errorResult(`Task not found: ${args.taskId}`);
+      return {
+        content: [{ type: "text", text: formatDelegateResult(result) }],
+        structuredContent: {
+          ok: true,
+          ...result
+        }
+      };
+    },
+
+    async taskResumeTool(args: TaskLookupArgs): Promise<CallToolResult> {
+      if (!args.taskId) return errorResult("taskId is required");
+      const result = await manager.resume(args.taskId);
+      if (!result) return errorResult(`Task not found or no Claude session available: ${args.taskId}`);
+      return {
+        content: [{ type: "text", text: formatDelegateResult(result) }],
+        structuredContent: {
+          ok: true,
+          ...result
+        }
       };
     },
 
@@ -508,13 +536,25 @@ function formatDelegateResult(result: Awaited<ReturnType<TaskManager["run"]>>): 
   ].filter(Boolean).join("\n");
 }
 
-function formatTask(task: { id: string; status: string; runId: string; updatedAt: string; planId?: string; planPath?: string; error?: string }): string {
+function formatTask(task: {
+  id: string;
+  status: string;
+  runId: string;
+  updatedAt: string;
+  planId?: string;
+  planPath?: string;
+  retryOf?: string;
+  resumeOf?: string;
+  error?: string;
+}): string {
   return [
     `Task: ${task.id}`,
     `Run: ${task.runId}`,
     `Status: ${task.status}`,
     task.planId ? `Plan: ${task.planId}` : undefined,
     task.planPath ? `Plan path: ${task.planPath}` : undefined,
+    task.retryOf ? `Retry of: ${task.retryOf}` : undefined,
+    task.resumeOf ? `Resume of: ${task.resumeOf}` : undefined,
     `Updated: ${task.updatedAt}`,
     task.error ? `Error: ${task.error}` : undefined
   ].filter(Boolean).join("\n");

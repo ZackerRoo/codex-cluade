@@ -102,6 +102,8 @@ Background tasks return a `taskId`. Use:
 - `background_output`: read task artifacts, Claude logs, and transcript tail
 - `task_list`: list tracked background tasks
 - `task_cancel`: cancel a background task
+- `task_retry`: start a fresh background retry from a previous task
+- `task_resume`: start a background retry that resumes the latest Claude session from a previous task
 - `agent_catalog`: list available agents, categories, and profiles
 
 Plan-driven workflow tools:
@@ -191,6 +193,8 @@ In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboa
 - create a saved implementation plan
 - execute a saved plan
 - cancel currently `pending` or `running` tasks
+- retry `failed`, `interrupted`, or `cancelled` tasks
+- resume a failed/interrupted/cancelled Claude task when a session id is available
 
 The shared runtime writes its Dashboard URL to stderr so MCP stdout stays protocol-clean. The task creation panel is hidden when running the standalone read-only dashboard.
 

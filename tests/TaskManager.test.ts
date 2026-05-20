@@ -130,6 +130,61 @@ describe("TaskManager", () => {
     assert.equal(manager.get(first.taskId ?? "")?.status, "completed");
     assert.equal(manager.get(second.taskId ?? "")?.status, "running");
   });
+
+  it("retries cancelled tasks as new background tasks", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-retry-"));
+    const manager = createManager(new TaskStore({ rootDir: storeDir }));
+    const launched = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Implement login cache",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "retry-source"
+    });
+    manager.cancel(launched.taskId ?? "");
+
+    const retried = await manager.retry("retry-source");
+
+    assert.equal(retried?.mode, "background");
+    assert.ok(retried?.taskId);
+    assert.notEqual(retried?.taskId, "retry-source");
+    assert.equal(retried?.task?.retryOf, "retry-source");
+    assert.equal(retried?.task?.request, "Implement login cache");
+  });
+
+  it("resumes tasks with the latest Claude session id", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-resume-"));
+    const store = new TaskStore({ rootDir: storeDir });
+    store.save({
+      id: "resume-source",
+      mode: "background",
+      status: "failed",
+      workspace: "/tmp/project",
+      request: "Continue implementation",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      runId: "resume-source",
+      createdAt: "2026-05-20T00:00:00.000Z",
+      updatedAt: "2026-05-20T00:00:01.000Z",
+      result: {
+        results: [
+          {
+            agent: "claude",
+            agentSessionId: "495bcb7d-c68b-4457-9f86-16775d6c97f9"
+          }
+        ]
+      }
+    });
+    const manager = createManager(store);
+
+    const resumed = await manager.resume("resume-source");
+
+    assert.equal(resumed?.mode, "background");
+    assert.equal(resumed?.task?.resumeOf, "resume-source");
+    assert.equal(resumed?.task?.agentSessionId, "495bcb7d-c68b-4457-9f86-16775d6c97f9");
+  });
 });
 
 function createManager(store?: TaskStore, concurrency?: { maxRunning?: number }): TaskManager {

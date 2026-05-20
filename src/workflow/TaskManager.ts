@@ -17,6 +17,8 @@ export interface DelegateTaskInput {
   agentSessionId?: string;
   planId?: string;
   planPath?: string;
+  retryOf?: string;
+  resumeOf?: string;
   model?: string;
   effort?: CoordinatorInput["effort"];
   timeoutMs?: number;
@@ -114,6 +116,45 @@ export class TaskManager {
     return publicTask(task);
   }
 
+  async retry(taskId: string): Promise<DelegateTaskResult | undefined> {
+    const task = this.get(taskId);
+    if (!task) return undefined;
+    return await this.run({
+      mode: "background",
+      workspace: task.workspace,
+      request: task.request,
+      stages: task.stages,
+      routing: {},
+      category: task.category,
+      profile: task.profile,
+      preferredAgent: task.preferredAgent,
+      planId: task.planId,
+      planPath: task.planPath,
+      retryOf: task.id
+    });
+  }
+
+  async resume(taskId: string): Promise<DelegateTaskResult | undefined> {
+    const task = this.get(taskId);
+    if (!task) return undefined;
+    const agentSessionId = task.agentSessionId ?? latestClaudeSessionId(task);
+    if (!agentSessionId) return undefined;
+    return await this.run({
+      mode: "background",
+      workspace: task.workspace,
+      request: task.request,
+      stages: task.stages,
+      routing: {},
+      category: task.category,
+      profile: task.profile,
+      preferredAgent: task.preferredAgent,
+      agentSessionId,
+      planId: task.planId,
+      planPath: task.planPath,
+      resumeOf: task.id
+    });
+  }
+
   private createTask(input: DelegateTaskInput): StoredTask {
     const now = new Date().toISOString();
     const id = input.runId ?? createTaskId();
@@ -130,6 +171,8 @@ export class TaskManager {
       agentSessionId: input.agentSessionId,
       planId: input.planId,
       planPath: input.planPath,
+      retryOf: input.retryOf,
+      resumeOf: input.resumeOf,
       runId: id,
       createdAt: now,
       updatedAt: now,
@@ -217,4 +260,20 @@ function isCancelled(task: StoredTask): boolean {
 function publicTask(task: StoredTask): DelegatedTask {
   const { controller: _controller, input: _input, ...publicFields } = task;
   return publicFields;
+}
+
+function latestClaudeSessionId(task: DelegatedTask): string | undefined {
+  const maybeResults = (task.result as { results?: unknown } | undefined)?.results;
+  if (!Array.isArray(maybeResults)) return undefined;
+  for (const result of [...maybeResults].reverse()) {
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      (result as { agent?: unknown }).agent === "claude" &&
+      typeof (result as { agentSessionId?: unknown }).agentSessionId === "string"
+    ) {
+      return (result as { agentSessionId: string }).agentSessionId;
+    }
+  }
+  return undefined;
 }

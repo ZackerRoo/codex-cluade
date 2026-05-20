@@ -151,6 +151,43 @@ describe("dashboard server", () => {
       await new Promise<void>(resolve => liveServer.close(() => resolve()));
     }
   });
+
+  it("retries tasks through the live dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-retry-store-"));
+    const store = new TaskStore({ rootDir: root });
+    store.save({
+      id: "dashboard-retry-source",
+      mode: "background",
+      status: "failed",
+      workspace: "/tmp/project",
+      request: "Retry me",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      runId: "dashboard-retry-source",
+      createdAt: "2026-05-20T00:00:00.000Z",
+      updatedAt: "2026-05-20T00:00:01.000Z"
+    });
+    const manager = new TaskManager(new AgentCoordinator({
+      providers: {
+        claude: new SlowProvider("claude"),
+        codex: new SlowProvider("codex")
+      }
+    }), store);
+    const tools = createTaskTools({ taskManager: manager });
+    const liveServer = createDashboardServer({ taskManager: manager, taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      const response = await fetch(`${liveBaseUrl}/api/tasks/dashboard-retry-source/retry`, { method: "POST" });
+      const data = await response.json() as { ok?: boolean; task?: { retryOf?: string }; taskId?: string };
+
+      assert.equal(response.status, 200);
+      assert.equal(data.ok, true);
+      assert.ok(data.taskId);
+      assert.equal(data.task?.retryOf, "dashboard-retry-source");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
 });
 
 function createTask(workspace: string): DelegatedTask {
