@@ -369,6 +369,12 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .actions { display: flex; gap: 8px; margin-top: 12px; }
 .danger-button { border: 1px solid #fecaca; background: #fff1f2; color: var(--danger); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
 .danger-button:hover { border-color: var(--danger); }
+.progress-track { height: 8px; background: #eef2f7; border-radius: 999px; overflow: hidden; margin: 10px 0; }
+.progress-fill { height: 100%; background: var(--accent); }
+.checklist { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+.checklist li { display: grid; grid-template-columns: 24px 1fr; gap: 6px; font-size: 13px; }
+.checklist .done { color: var(--ok); }
+.checklist .todo { color: var(--muted); }
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 8px; font-size: 13px; margin-top: 6px; }
 .kv span:first-child { color: var(--muted); }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #101828; color: #f8fafc; border-radius: 6px; padding: 12px; max-height: 360px; overflow: auto; }
@@ -555,6 +561,7 @@ async function cancelTask(taskId) {
 
 function renderDetail(task, output) {
   const summary = output.transcriptSummary;
+  const plan = output.planSummary;
   const canCancel = state.capabilities.liveTaskManager && (task.status === "running" || task.status === "pending");
   els.empty.hidden = true;
   els.detail.hidden = false;
@@ -581,6 +588,7 @@ function renderDetail(task, output) {
         \${kv("Tokens", summary ? String(summary.usage.inputTokens + summary.usage.outputTokens) : "")}
       </div>
     </div>
+    \${plan ? renderPlanSummary(plan) : ''}
     <div class="panel section">
       <h3>File writes</h3>
       <div class="pill-line">\${(summary?.fileWrites || []).map(file => '<span class="pill">' + escapeHtml(file) + '</span>').join("") || '<span class="meta">No file writes detected.</span>'}</div>
@@ -596,6 +604,18 @@ function renderDetail(task, output) {
   \`;
   const cancelButton = els.detail.querySelector("[data-cancel-task]");
   if (cancelButton) cancelButton.addEventListener("click", () => cancelTask(task.id));
+}
+
+function renderPlanSummary(plan) {
+  return \`
+    <div class="panel section">
+      <h3>Plan progress</h3>
+      \${kv("Plan", plan.path || "")}
+      \${kv("Progress", String(plan.completedSteps || 0) + "/" + String(plan.totalSteps || 0) + " (" + String(plan.progressPercent || 0) + "%)")}
+      <div class="progress-track"><div class="progress-fill" style="width: \${Number(plan.progressPercent || 0)}%"></div></div>
+      <ul class="checklist">\${(plan.steps || []).map(step => '<li><span class="' + (step.completed ? 'done' : 'todo') + '">' + (step.completed ? '[x]' : '[ ]') + '</span><span>' + escapeHtml(step.text) + '</span></li>').join("") || '<li><span></span><span class="meta">No checklist steps found.</span></li>'}</ul>
+    </div>
+  \`;
 }
 
 function kv(label, value) {

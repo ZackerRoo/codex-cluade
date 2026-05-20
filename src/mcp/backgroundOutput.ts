@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseClaudeTranscript, type ClaudeTranscriptSummary } from "../agents/ClaudeTranscript.js";
 import type { DelegatedTask, StageResult } from "../types.js";
+import { parsePlanChecklist, type PlanSummary } from "../workflow/PlanParser.js";
 
 export interface BackgroundOutputEvent {
   source: "artifact" | "transcript";
@@ -15,6 +16,7 @@ export interface BackgroundOutput {
   artifacts: Array<{ path: string; content: string }>;
   transcript?: { path: string; tail: string };
   transcriptSummary?: ClaudeTranscriptSummary;
+  planSummary?: PlanSummary & { path: string };
   events: BackgroundOutputEvent[];
   cursor: number;
   nextCursor: number;
@@ -29,12 +31,16 @@ export async function readBackgroundOutput(task: DelegatedTask, maxBytes = 12_00
     ? { path: transcriptPath, tail: tailText(transcriptContent, maxBytes) }
     : undefined;
   const transcriptSummary = transcriptContent ? parseClaudeTranscript(transcriptContent) : undefined;
+  const planContent = task.planPath ? await readFileOrEmpty(task.planPath) : "";
+  const planSummary = task.planPath && planContent
+    ? { path: task.planPath, ...parsePlanChecklist(planContent) }
+    : undefined;
   const eventSources = [
     ...artifactPaths(task).map(path => ({ source: "artifact" as const, path })),
     ...(transcriptPath ? [{ source: "transcript" as const, path: transcriptPath }] : [])
   ];
   const { events, nextCursor } = await readIncrementalEvents(eventSources, cursor, maxBytes);
-  return { task, artifacts, transcript, transcriptSummary, events, cursor, nextCursor, hasMore: false };
+  return { task, artifacts, transcript, transcriptSummary, planSummary, events, cursor, nextCursor, hasMore: false };
 }
 
 async function readArtifacts(task: DelegatedTask, maxBytes: number): Promise<Array<{ path: string; content: string }>> {

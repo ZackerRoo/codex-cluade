@@ -421,6 +421,7 @@ function buildPlannerRequest(request: string): string {
   return [
     "Create an implementation plan for the request below.",
     "Do not modify files. Return a concise markdown plan with goal, constraints, steps, verification, and risks.",
+    "The steps section must be a markdown checklist using '- [ ]' items so progress can be tracked later.",
     "",
     "## Request",
     request
@@ -541,6 +542,15 @@ function formatBackgroundOutput(output: Awaited<ReturnType<typeof readBackground
       `Tool calls: ${output.transcriptSummary.toolCalls.length}`,
       output.transcriptSummary.fileWrites.length > 0 ? `File writes: ${output.transcriptSummary.fileWrites.join(", ")}` : undefined
     ].filter((line): line is string => Boolean(line)));
+  }
+  if (output.planSummary) {
+    lines.push(
+      "",
+      "Plan summary",
+      `Plan: ${output.planSummary.path}`,
+      `Progress: ${output.planSummary.completedSteps}/${output.planSummary.totalSteps} (${output.planSummary.progressPercent}%)`,
+      ...output.planSummary.steps.map(step => `${step.completed ? "[x]" : "[ ]"} ${step.text}`)
+    );
   }
   if (output.events.length > 0) {
     lines.push("", `Incremental events: cursor ${output.cursor} -> ${output.nextCursor}`);

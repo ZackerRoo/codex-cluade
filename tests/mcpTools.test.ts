@@ -441,7 +441,7 @@ describe("delegate task MCP tools", () => {
         claudePath: "claude",
         exec: async () => ({
           code: 0,
-          stdout: JSON.stringify({ result: "1. Create index.html\n2. Verify the page text" }),
+          stdout: JSON.stringify({ result: "- [ ] Create index.html\n- [ ] Verify the page text" }),
           stderr: "",
           timedOut: false
         }),
@@ -461,6 +461,7 @@ describe("delegate task MCP tools", () => {
     const plan = await readFile(planPath, "utf8");
     assert.match(plan, /Build hello page/);
     assert.match(plan, /Create index\.html/);
+    assert.match(plan, /- \[ \] Verify the page text/);
   });
 
   it("executes a saved plan as a background task", async () => {
@@ -496,6 +497,39 @@ describe("delegate task MCP tools", () => {
     const status = await tools.taskStatusTool({ taskId: "execute-plan-run" });
     assert.equal(status.structuredContent?.planId, "plan");
     assert.match(String(status.structuredContent?.planPath), /plan\.md$/);
+  });
+
+  it("returns plan checklist progress in background output", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-plan-progress-test-"));
+    const planPath = join(workspace, "plan.md");
+    await writeFile(planPath, "- [x] Create index.html\n- [ ] Verify output", "utf8");
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "implemented plan" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.executePlanTool({
+      mode: "background",
+      workspace,
+      planPath,
+      runId: "plan-progress-run"
+    });
+    assert.equal(result.structuredContent?.ok, true);
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const output = await tools.backgroundOutputTool({ taskId: "plan-progress-run" });
+    const structured = output.structuredContent as { planSummary?: { totalSteps?: number; completedSteps?: number; progressPercent?: number } };
+    assert.equal(structured.planSummary?.totalSteps, 2);
+    assert.equal(structured.planSummary?.completedSteps, 1);
+    assert.equal(structured.planSummary?.progressPercent, 50);
   });
 });
 

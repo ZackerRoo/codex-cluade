@@ -120,7 +120,7 @@ Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-
 Use background_output with taskId="<task-id>", cursor=0.
 ```
 
-The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline.
+The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline. When a task is tied to a plan file, the response also includes `planSummary` with checklist progress.
 
 ## Plan Workflow
 
@@ -148,7 +148,16 @@ planId: <generated-plan-id>
 mode: background
 ```
 
-`create_plan` defaults to Claude as the planner when no `plannerProfile` or `preferredAgent` is provided, because the built-in `planner` profile is a Codex handoff profile. `execute_plan` defaults to the `coder` profile and stores `planId` and `planPath` on the resulting task, so Dashboard and `task_status` can trace which plan drove the implementation.
+`create_plan` defaults to Claude as the planner when no `plannerProfile` or `preferredAgent` is provided, because the built-in `planner` profile is a Codex handoff profile. The planner prompt asks for a markdown checklist using `- [ ]` items. `execute_plan` defaults to the `coder` profile and stores `planId` and `planPath` on the resulting task, so Dashboard and `task_status` can trace which plan drove the implementation.
+
+Plan checklist progress is parsed from the plan markdown:
+
+```md
+- [x] Create index.html
+- [ ] Verify output
+```
+
+Dashboard and `background_output` report completed steps, total steps, progress percentage, and the checklist items.
 
 ## Dashboard
 
