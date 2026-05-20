@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 import { createDashboardServer } from "../src/dashboard/server.js";
-import type { DelegatedTask } from "../src/types.js";
+import type { AgentName, DelegatedTask, StageInput, StageResult } from "../src/types.js";
+import type { AgentProvider } from "../src/agents/AgentProvider.js";
+import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
+import { TaskManager } from "../src/workflow/TaskManager.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
 
 describe("dashboard server", () => {
@@ -67,6 +70,40 @@ describe("dashboard server", () => {
     assert.equal(data.ok, true);
     assert.match(data.output?.artifacts?.[0]?.content ?? "", /implemented dashboard output/);
   });
+
+  it("cancels live tasks when attached to a TaskManager", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-live-store-"));
+    const store = new TaskStore({ rootDir: root });
+    const manager = new TaskManager(new AgentCoordinator({
+      providers: {
+        claude: new SlowProvider("claude"),
+        codex: new SlowProvider("codex")
+      }
+    }), store);
+    const launched = await manager.run({
+      mode: "background",
+      workspace: "/tmp/project",
+      request: "Long task",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "dashboard-live-task"
+    });
+    assert.equal(launched.task?.status, "running");
+
+    const liveServer = createDashboardServer({ taskManager: manager });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      const response = await fetch(`${liveBaseUrl}/api/tasks/dashboard-live-task/cancel`, { method: "POST" });
+      const data = await response.json() as { ok?: boolean; task?: { status?: string } };
+
+      assert.equal(response.status, 200);
+      assert.equal(data.ok, true);
+      assert.equal(data.task?.status, "cancelled");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
 });
 
 function createTask(workspace: string): DelegatedTask {
@@ -98,4 +135,40 @@ function createTask(workspace: string): DelegatedTask {
       ]
     }
   };
+}
+
+class SlowProvider implements AgentProvider {
+  constructor(readonly name: AgentName) {}
+
+  async run(input: StageInput): Promise<StageResult> {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 100);
+      input.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new Error("aborted"));
+      });
+    });
+    return {
+      ok: true,
+      runId: input.runId ?? "dashboard-live-task",
+      stage: input.stage,
+      agent: this.name,
+      status: "completed",
+      changedFiles: [],
+      requiresCodex: false,
+      summary: "done"
+    };
+  }
+}
+
+async function listenTestServer(server: Server): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") reject(new Error("Unexpected server address"));
+      else resolve(`http://127.0.0.1:${address.port}`);
+    });
+  });
 }

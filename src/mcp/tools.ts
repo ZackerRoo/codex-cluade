@@ -134,20 +134,15 @@ export async function runClaudeStageTool(
   }
 }
 
-export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; config?: BridgeConfig; taskStore?: TaskStore } = {}): TaskToolSet {
+export function createTaskTools(options: {
+  claude?: ClaudeCodeAgentOptions;
+  config?: BridgeConfig;
+  taskStore?: TaskStore;
+  taskManager?: TaskManager;
+} = {}): TaskToolSet {
   const config = options.config ?? loadBridgeConfig();
   const registry = new AgentRegistry(config);
-  const coordinator = new AgentCoordinator({
-    registry,
-    providers: {
-      claude: new ClaudeCodeAgent({
-        claudePath: process.env.CLAUDE_CODE_PATH ?? config.claudePath,
-        ...options.claude
-      }),
-      codex: new CodexAgent()
-    }
-  });
-  const manager = new TaskManager(coordinator, options.taskStore, { concurrency: config.concurrency });
+  const manager = options.taskManager ?? createTaskManager({ config, registry, claude: options.claude, taskStore: options.taskStore });
 
   return {
     async delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult> {
@@ -326,6 +321,27 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
       };
     }
   };
+}
+
+export function createTaskManager(options: {
+  config?: BridgeConfig;
+  registry?: AgentRegistry;
+  claude?: ClaudeCodeAgentOptions;
+  taskStore?: TaskStore;
+} = {}): TaskManager {
+  const config = options.config ?? loadBridgeConfig();
+  const registry = options.registry ?? new AgentRegistry(config);
+  const coordinator = new AgentCoordinator({
+    registry,
+    providers: {
+      claude: new ClaudeCodeAgent({
+        claudePath: process.env.CLAUDE_CODE_PATH ?? config.claudePath,
+        ...options.claude
+      }),
+      codex: new CodexAgent()
+    }
+  });
+  return new TaskManager(coordinator, options.taskStore, { concurrency: config.concurrency });
 }
 
 function validateArgs(args: ClaudeRunStageArgs): string | undefined {

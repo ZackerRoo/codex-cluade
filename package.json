@@ -6,7 +6,8 @@
   "bin": {
     "claude-agent-bridge": "dist/src/cli.js",
     "claude-agent-bridge-mcp": "dist/src/mcpServer.js",
-    "claude-agent-bridge-dashboard": "dist/src/dashboardCli.js"
+    "claude-agent-bridge-dashboard": "dist/src/dashboardCli.js",
+    "claude-agent-bridge-mcp-dashboard": "dist/src/mcpDashboardServer.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -14,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bridge": "npm run build && node dist/src/cli.js",
     "mcp": "npm run build && node dist/src/mcpServer.js",
-    "dashboard": "npm run build && node dist/src/dashboardCli.js"
+    "dashboard": "npm run build && node dist/src/dashboardCli.js",
+    "mcp-dashboard": "npm run build && node dist/src/mcpDashboardServer.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

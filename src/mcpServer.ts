@@ -2,20 +2,21 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { createTaskTools, runClaudeStageTool } from "./mcp/tools.js";
+import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "./mcp/tools.js";
 
 const stageSchema = z.enum(["plan", "implement", "review", "analyze"]);
 const effortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]).optional();
 const agentSchema = z.enum(["claude", "codex"]).optional();
 const modeSchema = z.enum(["sync", "background"]).optional();
 
-export function createServer(): McpServer {
+export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServer {
   const server = new McpServer({
     name: "claude-agent-bridge",
     version: "0.1.0"
   });
-  const taskTools = createTaskTools();
+  const taskTools = options.taskTools ?? createTaskTools();
 
   server.registerTool(
     "claude_run_stage",
@@ -229,7 +230,9 @@ async function main(): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

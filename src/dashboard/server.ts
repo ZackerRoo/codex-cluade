@@ -2,12 +2,14 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 import { readBackgroundOutput } from "../mcp/backgroundOutput.js";
 import type { DelegatedTask, TaskStatus } from "../types.js";
+import type { TaskManager } from "../workflow/TaskManager.js";
 import { TaskStore } from "../workflow/TaskStore.js";
 
 export interface DashboardOptions {
   host?: string;
   port?: number;
   taskStore?: TaskStore;
+  taskManager?: TaskManager;
   maxBytes?: number;
 }
 
@@ -18,11 +20,12 @@ export interface DashboardListener {
 
 export function createDashboardServer(options: DashboardOptions = {}): Server {
   const taskStore = options.taskStore ?? new TaskStore();
+  const taskManager = options.taskManager;
   const maxBytes = options.maxBytes ?? 24_000;
 
   return createServer(async (request, response) => {
     try {
-      await routeRequest(request, response, taskStore, maxBytes);
+      await routeRequest(request, response, { taskStore, taskManager, maxBytes });
     } catch (error) {
       sendJson(response, 500, {
         ok: false,
@@ -51,29 +54,28 @@ export async function listenDashboard(options: DashboardOptions = {}): Promise<D
 async function routeRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  taskStore: TaskStore,
-  maxBytes: number
+  context: { taskStore: TaskStore; taskManager?: TaskManager; maxBytes: number }
 ): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  if (request.method !== "GET") {
+  if (request.method !== "GET" && request.method !== "POST") {
     sendJson(response, 405, { ok: false, error: "Method not allowed" });
     return;
   }
 
-  if (url.pathname === "/") {
+  if (request.method === "GET" && url.pathname === "/") {
     sendHtml(response, DASHBOARD_HTML);
     return;
   }
-  if (url.pathname === "/dashboard.css") {
+  if (request.method === "GET" && url.pathname === "/dashboard.css") {
     sendText(response, 200, "text/css; charset=utf-8", DASHBOARD_CSS);
     return;
   }
-  if (url.pathname === "/dashboard.js") {
+  if (request.method === "GET" && url.pathname === "/dashboard.js") {
     sendText(response, 200, "text/javascript; charset=utf-8", DASHBOARD_JS);
     return;
   }
-  if (url.pathname === "/api/tasks") {
-    const tasks = taskStore.list();
+  if (request.method === "GET" && url.pathname === "/api/tasks") {
+    const tasks = listTasks(context);
     sendJson(response, 200, {
       ok: true,
       generatedAt: new Date().toISOString(),
@@ -83,18 +85,44 @@ async function routeRequest(
     return;
   }
   if (url.pathname.startsWith("/api/tasks/")) {
-    const taskId = decodeURIComponent(url.pathname.slice("/api/tasks/".length));
-    const task = taskStore.get(taskId);
+    const parts = url.pathname.slice("/api/tasks/".length).split("/");
+    const taskId = decodeURIComponent(parts[0] ?? "");
+    if (request.method === "POST" && parts[1] === "cancel") {
+      if (!context.taskManager) {
+        sendJson(response, 409, { ok: false, error: "Dashboard is not attached to a live TaskManager." });
+        return;
+      }
+      const task = context.taskManager.cancel(taskId);
+      if (!task) {
+        sendJson(response, 404, { ok: false, error: `Task not found: ${taskId}` });
+        return;
+      }
+      sendJson(response, 200, { ok: true, task });
+      return;
+    }
+    if (request.method !== "GET" || parts.length !== 1) {
+      sendJson(response, 404, { ok: false, error: "Not found" });
+      return;
+    }
+    const task = getTask(context, taskId);
     if (!task) {
       sendJson(response, 404, { ok: false, error: `Task not found: ${taskId}` });
       return;
     }
-    const output = await readBackgroundOutput(task, maxBytes, Number(url.searchParams.get("cursor") ?? 0));
+    const output = await readBackgroundOutput(task, context.maxBytes, Number(url.searchParams.get("cursor") ?? 0));
     sendJson(response, 200, { ok: true, task, output });
     return;
   }
 
   sendJson(response, 404, { ok: false, error: "Not found" });
+}
+
+function listTasks(context: { taskStore: TaskStore; taskManager?: TaskManager }): DelegatedTask[] {
+  return context.taskManager ? context.taskManager.list() : context.taskStore.list();
+}
+
+function getTask(context: { taskStore: TaskStore; taskManager?: TaskManager }, taskId: string): DelegatedTask | undefined {
+  return context.taskManager ? context.taskManager.get(taskId) : context.taskStore.get(taskId);
 }
 
 function summarizeTasks(tasks: DelegatedTask[]): Record<TaskStatus, number> & { total: number; runningCapacity?: number } {
@@ -231,6 +259,9 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .empty { color: var(--muted); height: 100%; display: grid; place-items: center; text-align: center; padding: 28px; }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; background: #fff; }
+.actions { display: flex; gap: 8px; margin-top: 12px; }
+.danger-button { border: 1px solid #fecaca; background: #fff1f2; color: var(--danger); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+.danger-button:hover { border-color: var(--danger); }
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 8px; font-size: 13px; margin-top: 6px; }
 .kv span:first-child { color: var(--muted); }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #101828; color: #f8fafc; border-radius: 6px; padding: 12px; max-height: 360px; overflow: auto; }
@@ -314,8 +345,20 @@ async function loadDetail(taskId) {
   renderDetail(data.task, data.output || {});
 }
 
+async function cancelTask(taskId) {
+  const response = await fetch("/api/tasks/" + encodeURIComponent(taskId) + "/cancel", { method: "POST" });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Failed to cancel task");
+    return;
+  }
+  await loadTasks();
+  await loadDetail(taskId);
+}
+
 function renderDetail(task, output) {
   const summary = output.transcriptSummary;
+  const canCancel = task.status === "running" || task.status === "pending";
   els.empty.hidden = true;
   els.detail.hidden = false;
   els.detail.innerHTML = \`
@@ -331,6 +374,7 @@ function renderDetail(task, output) {
         \${kv("Plan path", task.planPath || "")}
         \${kv("Profile", task.profile || "")}
         \${kv("Category", task.category || "")}
+        \${canCancel ? '<div class="actions"><button class="danger-button" type="button" data-cancel-task="' + escapeAttr(task.id) + '">Cancel task</button></div>' : ''}
       </div>
       <div class="panel">
         <h3>Claude</h3>
@@ -353,6 +397,8 @@ function renderDetail(task, output) {
       <pre>\${escapeHtml((summary?.timeline || []).map(item => [item.timestamp, item.type, item.summary].filter(Boolean).join(" | ")).join("\\n") || "No transcript summary available.")}</pre>
     </div>
   \`;
+  const cancelButton = els.detail.querySelector("[data-cancel-task]");
+  if (cancelButton) cancelButton.addEventListener("click", () => cancelTask(task.id));
 }
 
 function kv(label, value) {

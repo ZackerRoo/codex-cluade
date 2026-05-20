@@ -12,6 +12,16 @@ npm run build
 codex mcp add claude-agent-bridge -- node "$PWD/dist/src/mcpServer.js"
 ```
 
+If you want the MCP server and Dashboard to share the same live `TaskManager`, use the unified runtime instead:
+
+```bash
+npm install
+npm run build
+codex mcp add claude-agent-bridge -- node "$PWD/dist/src/mcpDashboardServer.js" --port 8787
+```
+
+The unified runtime starts MCP over stdio and a Dashboard on `http://127.0.0.1:8787` in the same process. Dashboard status and MCP tools see the same running tasks, so Dashboard can cancel live `pending` or `running` tasks.
+
 Claude Code CLI authentication must be visible to the MCP server process. For this machine, keep these environment variable names available to Codex:
 
 ```toml
@@ -142,7 +152,7 @@ mode: background
 
 ## Dashboard
 
-The bridge includes a local read-only dashboard for inspecting persisted background tasks and Claude execution traces:
+The bridge includes a local dashboard for inspecting background tasks and Claude execution traces:
 
 ```bash
 npm run dashboard
@@ -154,13 +164,19 @@ By default it listens on `http://127.0.0.1:8765`. You can override the host, por
 npm run dashboard -- --port 8787 --host 127.0.0.1 --max-bytes 48000
 ```
 
-The dashboard reads the same task store used by MCP:
+Standalone `npm run dashboard` is a read-mostly view over persisted task files. It reads:
 
 - task state from `~/.codex-claude/tasks/*.json`
 - artifacts and logs from each workspace's `.agent-runs/<run-id>/`
 - Claude transcript summaries from the resolved `agentTranscriptPath`
 
-The first version is intentionally read-only: use MCP tools for `delegate_task`, `task_cancel`, and session continuation, and use the dashboard for monitoring task queues, output, file writes, and transcript timelines.
+For live task control, run the unified MCP + Dashboard runtime:
+
+```bash
+npm run mcp-dashboard -- --port 8787
+```
+
+In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboard can cancel currently `pending` or `running` tasks. The shared runtime writes its Dashboard URL to stderr so MCP stdout stays protocol-clean.
 
 ## Session Continuation
 
