@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -432,6 +432,70 @@ describe("delegate task MCP tools", () => {
     assert.equal(result.structuredContent?.ok, true);
     assert.match(inputs[0] ?? "", /## Injected skills/);
     assert.match(inputs[0] ?? "", /Use a single self-contained index\.html file/);
+  });
+
+  it("creates a saved implementation plan", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-plan-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "1. Create index.html\n2. Verify the page text" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.createPlanTool({
+      workspace,
+      request: "Build hello page",
+      planId: "hello-plan"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.planId, "hello-plan");
+    const planPath = String(result.structuredContent?.planPath);
+    const plan = await readFile(planPath, "utf8");
+    assert.match(plan, /Build hello page/);
+    assert.match(plan, /Create index\.html/);
+  });
+
+  it("executes a saved plan as a background task", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-exec-plan-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => {
+          assert.match(options.input ?? "", /Plan file:/);
+          assert.match(options.input ?? "", /Create index\.html/);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "implemented plan" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      }
+    });
+    await writeFile(join(workspace, "plan.md"), "Create index.html", "utf8");
+
+    const result = await tools.executePlanTool({
+      mode: "background",
+      workspace,
+      planPath: "plan.md",
+      runId: "execute-plan-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.planId, "plan");
+    assert.equal(result.structuredContent?.taskId, "execute-plan-run");
+    const status = await tools.taskStatusTool({ taskId: "execute-plan-run" });
+    assert.equal(status.structuredContent?.planId, "plan");
+    assert.match(String(status.structuredContent?.planPath), /plan\.md$/);
   });
 });
 

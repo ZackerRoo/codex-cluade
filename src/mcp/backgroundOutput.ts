@@ -47,10 +47,13 @@ async function readArtifacts(task: DelegatedTask, maxBytes: number): Promise<Arr
 }
 
 function artifactPaths(task: DelegatedTask): string[] {
-  return task.stages.flatMap(stage => [
+  return [
+    ...(task.planPath ? [task.planPath] : []),
+    ...task.stages.flatMap(stage => [
     join(task.workspace, ".agent-runs", task.runId, `${stage}.output.md`),
     join(task.workspace, ".agent-runs", task.runId, `claude-${stage}.log`)
-  ]);
+    ])
+  ];
 }
 
 async function readTail(path: string, maxBytes: number): Promise<string> {

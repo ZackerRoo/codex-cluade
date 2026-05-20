@@ -327,6 +327,8 @@ function renderDetail(task, output) {
         \${kv("Run ID", task.runId)}
         \${kv("Workspace", task.workspace)}
         \${kv("Stages", (task.stages || []).join(" -> "))}
+        \${kv("Plan", task.planId || "")}
+        \${kv("Plan path", task.planPath || "")}
         \${kv("Profile", task.profile || "")}
         \${kv("Category", task.category || "")}
       </div>

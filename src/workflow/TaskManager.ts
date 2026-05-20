@@ -15,6 +15,8 @@ export interface DelegateTaskInput {
   preferredAgent?: AgentName;
   runId?: string;
   agentSessionId?: string;
+  planId?: string;
+  planPath?: string;
   model?: string;
   effort?: CoordinatorInput["effort"];
   timeoutMs?: number;
@@ -126,6 +128,8 @@ export class TaskManager {
       profile: input.profile,
       preferredAgent: input.preferredAgent,
       agentSessionId: input.agentSessionId,
+      planId: input.planId,
+      planPath: input.planPath,
       runId: id,
       createdAt: now,
       updatedAt: now,

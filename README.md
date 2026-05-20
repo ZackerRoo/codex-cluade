@@ -94,6 +94,11 @@ Background tasks return a `taskId`. Use:
 - `task_cancel`: cancel a background task
 - `agent_catalog`: list available agents, categories, and profiles
 
+Plan-driven workflow tools:
+
+- `create_plan`: generate a markdown implementation plan and save it under `<workspace>/.codex-claude/plans/<planId>.md`
+- `execute_plan`: read a saved plan and delegate the implementation to an executor agent
+
 Task metadata is persisted under `~/.codex-claude/tasks/<taskId>.json`, so `task_status`, `task_list`, and `background_output` can inspect completed tasks after the MCP server restarts. If a saved task was `pending` or `running` when the server restarted, it is reported as `interrupted`; use its `resumeCommand` or `agentSessionId` to continue the Claude session.
 
 Artifacts still persist under `.agent-runs/<run-id>/`.
@@ -106,6 +111,34 @@ Use background_output with taskId="<task-id>", cursor=0.
 ```
 
 The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline.
+
+## Plan Workflow
+
+For more controlled work, split planning and execution:
+
+```text
+Use create_plan:
+workspace: /absolute/path/to/project
+request: Implement the requested feature.
+```
+
+The tool returns:
+
+```text
+planId: <generated-plan-id>
+planPath: /absolute/path/to/project/.codex-claude/plans/<planId>.md
+```
+
+Then execute the plan:
+
+```text
+Use execute_plan:
+workspace: /absolute/path/to/project
+planId: <generated-plan-id>
+mode: background
+```
+
+`create_plan` defaults to Claude as the planner when no `plannerProfile` or `preferredAgent` is provided, because the built-in `planner` profile is a Codex handoff profile. `execute_plan` defaults to the `coder` profile and stores `planId` and `planPath` on the resulting task, so Dashboard and `task_status` can trace which plan drove the implementation.
 
 ## Dashboard
 

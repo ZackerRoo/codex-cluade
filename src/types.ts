@@ -63,6 +63,8 @@ export interface DelegatedTask {
   profile?: AgentProfileName;
   preferredAgent?: AgentName;
   agentSessionId?: string;
+  planId?: string;
+  planPath?: string;
   runId: string;
   createdAt: string;
   updatedAt: string;

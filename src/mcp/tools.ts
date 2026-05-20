@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ClaudeCodeAgentOptions } from "../agents/ClaudeCodeAgent.js";
 import { AgentRegistry } from "../agents/AgentRegistry.js";
@@ -7,6 +8,7 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
+import { createPlanId, PlanStore, type PlanRecord } from "../workflow/PlanStore.js";
 import { TaskManager } from "../workflow/TaskManager.js";
 import type { TaskStore } from "../workflow/TaskStore.js";
 import { readBackgroundOutput } from "./backgroundOutput.js";
@@ -45,6 +47,34 @@ export interface DelegateTaskArgs {
   timeoutMs?: number;
 }
 
+export interface CreatePlanArgs {
+  workspace: string;
+  request: string;
+  planId?: string;
+  plannerProfile?: AgentProfileName;
+  preferredAgent?: AgentName;
+  loadSkills?: string[];
+  model?: string;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  timeoutMs?: number;
+}
+
+export interface ExecutePlanArgs {
+  mode?: TaskMode;
+  workspace: string;
+  planId?: string;
+  planPath?: string;
+  request?: string;
+  executorProfile?: AgentProfileName;
+  preferredAgent?: AgentName;
+  runId?: string;
+  agentSessionId?: string;
+  loadSkills?: string[];
+  model?: string;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  timeoutMs?: number;
+}
+
 export interface TaskLookupArgs {
   taskId: string;
   maxBytes?: number;
@@ -53,6 +83,8 @@ export interface TaskLookupArgs {
 
 export interface TaskToolSet {
   delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult>;
+  createPlanTool(args: CreatePlanArgs): Promise<CallToolResult>;
+  executePlanTool(args: ExecutePlanArgs): Promise<CallToolResult>;
   taskStatusTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskCancelTool(args: TaskLookupArgs): Promise<CallToolResult>;
   backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
@@ -162,6 +194,87 @@ export function createTaskTools(options: { claude?: ClaudeCodeAgentOptions; conf
       }
     },
 
+    async createPlanTool(args: CreatePlanArgs): Promise<CallToolResult> {
+      const validationError = validateCreatePlanArgs(args, registry);
+      if (validationError) return errorResult(validationError);
+
+      try {
+        const planId = args.planId ?? createPlanId();
+        const skills = await resolveSkills(args.loadSkills, config);
+        const result = await manager.run({
+          mode: "sync",
+          workspace: args.workspace,
+          request: buildPlannerRequest(args.request),
+          stages: ["plan"],
+          routing: {},
+          profile: args.plannerProfile,
+          preferredAgent: args.preferredAgent ?? (args.plannerProfile ? undefined : "claude"),
+          runId: `plan-${planId}`,
+          model: args.model,
+          effort: args.effort,
+          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
+          skills
+        });
+        const stageResult = result.result?.results.at(-1);
+        if (!result.result?.ok || !stageResult?.outputPath) {
+          return errorResult(result.result?.summary ?? "Plan creation failed");
+        }
+        const planContent = await readFile(stageResult.outputPath, "utf8");
+        const plan = await new PlanStore(args.workspace).write(planId, normalizePlanContent(planId, args.request, planContent));
+        return {
+          content: [{ type: "text", text: formatPlanCreated(plan, stageResult.runId) }],
+          structuredContent: {
+            ok: true,
+            planId: plan.planId,
+            planPath: plan.planPath,
+            plannerRunId: stageResult.runId,
+            plannerResult: stageResult
+          }
+        };
+      } catch (error) {
+        return errorResult(error instanceof Error ? error.message : String(error));
+      }
+    },
+
+    async executePlanTool(args: ExecutePlanArgs): Promise<CallToolResult> {
+      const validationError = validateExecutePlanArgs(args, registry);
+      if (validationError) return errorResult(validationError);
+
+      try {
+        const plan = await new PlanStore(args.workspace).read({ planId: args.planId, planPath: args.planPath });
+        const skills = await resolveSkills(args.loadSkills, config);
+        const result = await manager.run({
+          mode: args.mode ?? "sync",
+          workspace: args.workspace,
+          request: buildExecutorRequest(plan, args.request),
+          stages: ["implement"],
+          routing: {},
+          profile: args.executorProfile ?? (args.preferredAgent ? undefined : "coder"),
+          preferredAgent: args.preferredAgent,
+          runId: args.runId ?? `exec-${plan.planId}`,
+          agentSessionId: args.agentSessionId,
+          planId: plan.planId,
+          planPath: plan.planPath,
+          model: args.model,
+          effort: args.effort,
+          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
+          skills
+        });
+        return {
+          content: [{ type: "text", text: formatExecutePlanResult(result, plan) }],
+          structuredContent: {
+            ok: result.mode === "sync" ? result.result?.ok === true : true,
+            planId: plan.planId,
+            planPath: plan.planPath,
+            ...result
+          },
+          isError: result.mode === "sync" && result.result?.ok === false ? true : undefined
+        };
+      } catch (error) {
+        return errorResult(error instanceof Error ? error.message : String(error));
+      }
+    },
+
     async taskStatusTool(args: TaskLookupArgs): Promise<CallToolResult> {
       if (!args.taskId) return errorResult("taskId is required");
       const task = manager.get(args.taskId);
@@ -250,8 +363,76 @@ function validateDelegateArgs(args: DelegateTaskArgs, registry = new AgentRegist
   return undefined;
 }
 
+function validateCreatePlanArgs(args: CreatePlanArgs, registry = new AgentRegistry()): string | undefined {
+  if (!args.workspace) return "workspace is required";
+  if (!args.request) return "request is required";
+  if (args.plannerProfile !== undefined && !registry.getProfile(args.plannerProfile)) {
+    return `invalid plannerProfile: ${String(args.plannerProfile)}`;
+  }
+  if (args.preferredAgent !== undefined && args.preferredAgent !== "claude" && args.preferredAgent !== "codex") {
+    return `invalid preferredAgent: ${String(args.preferredAgent)}`;
+  }
+  if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
+    return "timeoutMs must be a positive number";
+  }
+  return undefined;
+}
+
+function validateExecutePlanArgs(args: ExecutePlanArgs, registry = new AgentRegistry()): string | undefined {
+  if (!args.workspace) return "workspace is required";
+  if (!args.planId && !args.planPath) return "planId or planPath is required";
+  if (args.mode !== undefined && args.mode !== "sync" && args.mode !== "background") {
+    return `invalid mode: ${String(args.mode)}`;
+  }
+  if (args.executorProfile !== undefined && !registry.getProfile(args.executorProfile)) {
+    return `invalid executorProfile: ${String(args.executorProfile)}`;
+  }
+  if (args.preferredAgent !== undefined && args.preferredAgent !== "claude" && args.preferredAgent !== "codex") {
+    return `invalid preferredAgent: ${String(args.preferredAgent)}`;
+  }
+  if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
+    return "timeoutMs must be a positive number";
+  }
+  if (args.agentSessionId !== undefined && !isUuid(args.agentSessionId)) return "agentSessionId must be a Claude session UUID";
+  return undefined;
+}
+
 function isStage(value: unknown): value is Stage {
   return value === "plan" || value === "implement" || value === "review" || value === "analyze";
+}
+
+function buildPlannerRequest(request: string): string {
+  return [
+    "Create an implementation plan for the request below.",
+    "Do not modify files. Return a concise markdown plan with goal, constraints, steps, verification, and risks.",
+    "",
+    "## Request",
+    request
+  ].join("\n");
+}
+
+function buildExecutorRequest(plan: PlanRecord, request?: string): string {
+  return [
+    "Execute the implementation plan below. Keep changes scoped to the plan. Do not commit.",
+    request ? `Additional request: ${request}` : undefined,
+    "",
+    `Plan file: ${plan.planPath}`,
+    "",
+    plan.content
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function normalizePlanContent(planId: string, request: string, content: string): string {
+  return [
+    `# Plan ${planId}`,
+    "",
+    "## Original request",
+    request,
+    "",
+    "## Implementation plan",
+    content.trim(),
+    ""
+  ].join("\n");
 }
 
 function formatStageResult(result: StageResult): string {
@@ -273,6 +454,26 @@ function formatStageResult(result: StageResult): string {
   return lines.join("\n");
 }
 
+function formatPlanCreated(plan: PlanRecord, plannerRunId: string): string {
+  return [
+    "Plan created",
+    `Plan: ${plan.planId}`,
+    `Path: ${plan.planPath}`,
+    `Planner run: ${plannerRunId}`
+  ].join("\n");
+}
+
+function formatExecutePlanResult(result: Awaited<ReturnType<TaskManager["run"]>>, plan: PlanRecord): string {
+  return [
+    result.mode === "background" ? "Plan execution launched" : "Plan execution completed",
+    `Plan: ${plan.planId}`,
+    `Path: ${plan.planPath}`,
+    result.mode === "background" ? `Task: ${result.taskId}` : `Run: ${result.result?.runId}`,
+    result.mode === "background" ? `Status: ${result.task?.status ?? "pending"}` : `Status: ${result.result?.ok ? "completed" : "failed"}`,
+    result.mode === "sync" ? result.result?.summary : undefined
+  ].filter(Boolean).join("\n");
+}
+
 function formatDelegateResult(result: Awaited<ReturnType<TaskManager["run"]>>): string {
   if (result.mode === "background") {
     return [
@@ -290,11 +491,13 @@ function formatDelegateResult(result: Awaited<ReturnType<TaskManager["run"]>>): 
   ].filter(Boolean).join("\n");
 }
 
-function formatTask(task: { id: string; status: string; runId: string; updatedAt: string; error?: string }): string {
+function formatTask(task: { id: string; status: string; runId: string; updatedAt: string; planId?: string; planPath?: string; error?: string }): string {
   return [
     `Task: ${task.id}`,
     `Run: ${task.runId}`,
     `Status: ${task.status}`,
+    task.planId ? `Plan: ${task.planId}` : undefined,
+    task.planPath ? `Plan path: ${task.planPath}` : undefined,
     `Updated: ${task.updatedAt}`,
     task.error ? `Error: ${task.error}` : undefined
   ].filter(Boolean).join("\n");

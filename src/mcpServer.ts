@@ -78,6 +78,62 @@ export function createServer(): McpServer {
   );
 
   server.registerTool(
+    "create_plan",
+    {
+      title: "Create plan",
+      description: "Generate a markdown implementation plan and save it under the workspace .codex-claude/plans directory.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path where the plan belongs."),
+        request: z.string().min(1).describe("User request to plan."),
+        planId: z.string().optional().describe("Optional plan id. Defaults to a generated id."),
+        plannerProfile: z.string().optional().describe("Optional planner profile. Defaults to Claude when omitted."),
+        preferredAgent: agentSchema.describe("Optional planner agent override."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the planning prompt."),
+        model: z.string().optional().describe("Optional model argument for compatible providers."),
+        effort: effortSchema.describe("Optional effort level."),
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
+      },
+      annotations: {
+        title: "Create plan",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.createPlanTool(args)
+  );
+
+  server.registerTool(
+    "execute_plan",
+    {
+      title: "Execute plan",
+      description: "Read a saved markdown plan and delegate implementation to an executor agent.",
+      inputSchema: {
+        mode: modeSchema.describe("sync waits for completion; background returns a task id."),
+        workspace: z.string().min(1).describe("Absolute workspace path where the plan should execute."),
+        planId: z.string().optional().describe("Plan id under .codex-claude/plans."),
+        planPath: z.string().optional().describe("Absolute or workspace-relative plan path."),
+        request: z.string().optional().describe("Optional extra instruction to append to the execution prompt."),
+        executorProfile: z.string().optional().describe("Optional executor profile. Defaults to coder."),
+        preferredAgent: agentSchema.describe("Optional executor agent override."),
+        runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
+        agentSessionId: z.string().optional().describe("Optional Claude session id to resume when a Claude stage runs."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the execution prompt."),
+        model: z.string().optional().describe("Optional model argument for compatible providers."),
+        effort: effortSchema.describe("Optional effort level."),
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
+      },
+      annotations: {
+        title: "Execute plan",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.executePlanTool(args)
+  );
+
+  server.registerTool(
     "task_status",
     {
       title: "Task status",
