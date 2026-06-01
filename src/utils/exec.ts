@@ -10,7 +10,14 @@ export interface ExecResult {
 export function execFileCapture(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string; signal?: AbortSignal }
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    input?: string;
+    signal?: AbortSignal;
+    onStdoutChunk?: (chunk: string) => void;
+    onStderrChunk?: (chunk: string) => void;
+  }
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -45,9 +52,11 @@ export function execFileCapture(
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", chunk => {
       stdout += chunk;
+      options.onStdoutChunk?.(chunk);
     });
     child.stderr.on("data", chunk => {
       stderr += chunk;
+      options.onStderrChunk?.(chunk);
     });
     child.on("error", error => {
       if (settled) return;
@@ -62,4 +71,15 @@ export function execFileCapture(
 
     child.stdin.end(options.input ?? "");
   });
+}
+
+export function execShellCapture(
+  command: string,
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }
+): Promise<ExecResult> {
+  return execFileCapture("/bin/sh", ["-lc", command], options);
 }

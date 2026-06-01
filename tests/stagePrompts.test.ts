@@ -30,4 +30,36 @@ describe("buildStagePrompt", () => {
     assert.match(prompt, /Change session\.ts/);
     assert.match(prompt, /Do not commit/);
   });
+
+  it("includes dedicated agent role prompts", () => {
+    const prompt = buildStagePrompt({
+      stage: "review",
+      agent: "codex",
+      workspace: "/tmp/project",
+      request: "Review changes",
+      rolePrompt: "You are Momus. Be strict.",
+      previousOutputs: {}
+    });
+
+    assert.match(prompt, /## Agent role/);
+    assert.match(prompt, /You are Momus/);
+  });
+
+  it("injects workspace context and code intelligence guidance", () => {
+    const prompt = buildStagePrompt({
+      stage: "analyze",
+      agent: "claude",
+      workspace: "/tmp/project",
+      request: "Summarize the project",
+      workspaceContext: "Languages: typescript\nSymbols: UserService, formatUser",
+      previousOutputs: {}
+    });
+
+    assert.match(prompt, /## Workspace context/);
+    assert.match(prompt, /Languages: typescript/);
+    assert.match(prompt, /code_symbols/);
+    assert.match(prompt, /code_definition/);
+    assert.match(prompt, /code_references/);
+    assert.match(prompt, /code_diagnostics/);
+  });
 });

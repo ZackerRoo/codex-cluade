@@ -37,4 +37,30 @@ describe("AgentRouter", () => {
     assert.equal(route.effort, "high");
     assert.equal(route.timeoutMs, 900_000);
   });
+
+  it("routes built-in provider-specific coding profiles", () => {
+    const router = new AgentRouter();
+
+    assert.equal(router.resolveRoute("implement", {}, { profile: "codex-coder" }).agent, "codex-cli");
+    assert.equal(router.resolveRoute("implement", {}, { profile: "gemini-coder" }).agent, "gemini");
+  });
+
+  it("routes dedicated agent team profiles with role prompts", () => {
+    const router = new AgentRouter();
+
+    const prometheus = router.resolveRoute("plan", {}, { profile: "prometheus" });
+    assert.equal(prometheus.agent, "claude");
+    assert.match(prometheus.rolePrompt ?? "", /Prometheus/);
+
+    const sisyphus = router.resolveRoute("implement", {}, { profile: "sisyphus" });
+    assert.equal(sisyphus.agent, "claude");
+    assert.equal(sisyphus.effort, "high");
+    assert.match(sisyphus.rolePrompt ?? "", /Sisyphus/);
+
+    const momus = router.resolveRoute("review", {}, { profile: "momus" });
+    assert.equal(momus.agent, "claude");
+    assert.equal(momus.permission?.mode, "default");
+    assert.ok(momus.permission?.disallowedTools?.includes("Write"));
+    assert.match(momus.rolePrompt ?? "", /Momus/);
+  });
 });

@@ -17,6 +17,7 @@ export interface AgentRoute {
   timeoutMs?: number;
   permission?: PermissionPolicy;
   fallbacks?: AgentRouteCandidate[];
+  rolePrompt?: string;
 }
 
 const defaults: Record<Stage, AgentName> = {
@@ -46,7 +47,8 @@ export class AgentRouter {
           effort: profile.effort,
           timeoutMs: profile.timeoutMs,
           permission: profile.permission,
-          fallbacks: profile.fallbacks
+          fallbacks: profile.fallbacks,
+          rolePrompt: profile.rolePrompt
         };
       }
     }

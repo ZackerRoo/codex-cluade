@@ -12,6 +12,10 @@ export function buildStagePrompt(input: StageInput): string {
     `Stage: ${input.stage}`,
     `Workspace: ${input.workspace}`,
     "",
+    input.rolePrompt ? `## Agent role\n${input.rolePrompt}` : "",
+    "",
+    input.workspaceContext ? `${formatWorkspaceContext(input.workspaceContext)}\n\n${codeIntelligenceGuidance()}` : "",
+    "",
     "## User request",
     input.request,
     "",
@@ -51,4 +55,22 @@ Review the current changes. Prioritize bugs, regressions, and missing tests. Ref
 ## Instructions
 
 Analyze the request and codebase. Do not edit files. Return findings, risks, and recommended next steps.`;
+}
+
+function formatWorkspaceContext(context: string): string {
+  return context.trimStart().startsWith("## Workspace context")
+    ? context
+    : `## Workspace context\n\n${context}`;
+}
+
+function codeIntelligenceGuidance(): string {
+  return [
+    "## Code intelligence guidance",
+    "",
+    "When code intelligence tools are available, prefer them before broad text search for code navigation:",
+    "- Use code_symbols to map important files and exported APIs.",
+    "- Use code_definition to jump from usage to implementation.",
+    "- Use code_references before changing shared symbols.",
+    "- Use code_diagnostics to verify TypeScript/JavaScript or configured LSP diagnostics when relevant."
+  ].join("\n");
 }

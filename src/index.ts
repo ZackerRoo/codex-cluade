@@ -1,3 +1,7 @@
 export * from "./types.js";
+export * from "./agents/CliCodeAgent.js";
+export * from "./commands/CommandRegistry.js";
+export * from "./config/CodexSetup.js";
 export * from "./workflow/AgentCoordinator.js";
 export * from "./workflow/AgentRouter.js";
+export * from "./workflow/WorkflowStateStore.js";

@@ -16,6 +16,9 @@ describe("mcpServer", () => {
     await client.connect(transport);
     try {
       const tools = await client.listTools();
+      assert.ok(tools.tools.some(tool => tool.name === "provider_doctor"));
+      assert.ok(tools.tools.some(tool => tool.name === "command_catalog"));
+      assert.ok(tools.tools.some(tool => tool.name === "run_command"));
       assert.ok(tools.tools.some(tool => tool.name === "claude_run_stage"));
       assert.ok(tools.tools.some(tool => tool.name === "delegate_task"));
       assert.ok(tools.tools.some(tool => tool.name === "create_plan"));
@@ -27,6 +30,11 @@ describe("mcpServer", () => {
       assert.ok(tools.tools.some(tool => tool.name === "task_cancel"));
       assert.ok(tools.tools.some(tool => tool.name === "task_retry"));
       assert.ok(tools.tools.some(tool => tool.name === "task_resume"));
+      assert.ok(tools.tools.some(tool => tool.name === "auto_dispatch"));
+      assert.ok(tools.tools.some(tool => tool.name === "code_symbols"));
+      assert.ok(tools.tools.some(tool => tool.name === "code_definition"));
+      assert.ok(tools.tools.some(tool => tool.name === "code_references"));
+      assert.ok(tools.tools.some(tool => tool.name === "code_diagnostics"));
     } finally {
       await client.close();
     }

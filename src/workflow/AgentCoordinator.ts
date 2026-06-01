@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { AgentRegistry } from "../agents/AgentRegistry.js";
 import type { AgentProvider } from "../agents/AgentProvider.js";
+import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import type { AgentName, AgentProfileName, Effort, InjectedSkill, Stage, StageResult, TaskCategory } from "../types.js";
 import { AgentRouter, type RoutingConfig } from "./AgentRouter.js";
 import { StageRunner } from "./StageRunner.js";
@@ -35,7 +36,7 @@ export class AgentCoordinator {
   private readonly router: AgentRouter;
   private readonly runner: StageRunner;
 
-  constructor(options: { providers: Record<AgentName, AgentProvider>; registry?: AgentRegistry }) {
+  constructor(options: { providers: Partial<Record<AgentName, AgentProvider>>; registry?: AgentRegistry }) {
     this.registry = options.registry ?? new AgentRegistry();
     this.router = new AgentRouter(this.registry);
     this.runner = new StageRunner(options.providers);
@@ -52,6 +53,7 @@ export class AgentCoordinator {
     const previousOutputs: Record<string, string> = {};
     const results: StageResult[] = [];
     const stageOutcomes: StageResult[] = [];
+    const workspaceContext = await buildWorkspaceContext({ workspace: input.workspace });
 
     for (const stage of stages) {
       if (input.signal?.aborted) {
@@ -79,6 +81,8 @@ export class AgentCoordinator {
         agent: route.agent,
         workspace: input.workspace,
         request: input.request,
+        rolePrompt: route.rolePrompt ?? profile?.rolePrompt,
+        workspaceContext,
         runId,
         agentSessionId: input.agentSessionId,
         previousOutputs,
@@ -93,11 +97,14 @@ export class AgentCoordinator {
 
       if (!result.ok && route.fallbacks && route.fallbacks.length > 0 && !input.signal?.aborted) {
         for (const fallback of route.fallbacks) {
+          if (!this.runner.hasProvider(fallback.agent)) continue;
           result = await this.runner.run({
             stage,
             agent: fallback.agent,
             workspace: input.workspace,
             request: input.request,
+            rolePrompt: profile?.rolePrompt,
+            workspaceContext,
             runId,
             agentSessionId: input.agentSessionId,
             previousOutputs,

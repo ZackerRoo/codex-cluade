@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -75,6 +75,42 @@ describe("runClaudeStageTool", () => {
     assert.match(inputs[0] ?? "", /Use a single self-contained index\.html file/);
   });
 
+  it("injects workspace context into direct Claude stage prompts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-mcp-context-test-"));
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(join(workspace, "README.md"), "# Context Demo\n", "utf8");
+    await writeFile(join(workspace, "src", "service.ts"), "export function formatUser(name: string): string { return name; }\n", "utf8");
+    const inputs: Array<string | undefined> = [];
+
+    const result = await runClaudeStageTool(
+      {
+        stage: "analyze",
+        workspace,
+        request: "Summarize this project",
+        runId: "test-context-run"
+      },
+      {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => {
+          inputs.push(options.input);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "analysis output" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      }
+    );
+
+    assert.equal(result.isError, undefined);
+    assert.match(inputs[0] ?? "", /## Workspace context/);
+    assert.match(inputs[0] ?? "", /Context Demo/);
+    assert.match(inputs[0] ?? "", /formatUser/);
+    assert.match(inputs[0] ?? "", /code_symbols/);
+  });
+
   it("returns tool errors as visible MCP results", async () => {
     const result = await runClaudeStageTool(
       {
@@ -96,6 +132,221 @@ describe("runClaudeStageTool", () => {
 });
 
 describe("delegate task MCP tools", () => {
+  it("reports provider doctor status", async () => {
+    const tools = await createTestTaskTools();
+
+    const result = await tools.providerDoctorTool();
+
+    assert.equal(typeof result.structuredContent?.ok, "boolean");
+    const checks = result.structuredContent?.checks as Array<{ provider?: string; status?: string }> | undefined;
+    assert.ok(checks?.some(check => check.provider === "claude"));
+    assert.ok(checks?.some(check => check.provider === "codex-cli"));
+    assert.ok(checks?.some(check => check.provider === "gemini"));
+    assert.ok(checks?.some(check => check.provider === "opencode"));
+  });
+
+  it("lists and runs command templates", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-command-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "command implemented" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const catalog = await tools.commandCatalogTool();
+    const commands = catalog.structuredContent?.commands as Array<{ name?: string }> | undefined;
+    assert.ok(commands?.some(command => command.name === "start-work"));
+
+    const result = await tools.runCommandTool({
+      command: "/start-work build a hello page",
+      workspace,
+      runId: "command-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.command, "start-work");
+    assert.equal(result.structuredContent?.taskId, "command-run");
+    const status = await tools.taskStatusTool({ taskId: "command-run" });
+    assert.match(String(status.structuredContent?.request), /build a hello page/);
+  });
+
+  it("runs plan command templates through create_plan", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-plan-command-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "- [ ] Create index.html" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.runCommandTool({
+      command: "plan-work",
+      workspace,
+      request: "Build hello page",
+      planId: "command-plan"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.command, "plan-work");
+    assert.equal(result.structuredContent?.planId, "command-plan");
+    const plan = await readFile(join(workspace, ".codex-claude", "plans", "command-plan.md"), "utf8");
+    assert.match(plan, /Create index\.html/);
+  });
+
+  it("runs ultrawork as plan then parallel child execution", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-ultrawork-command-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({
+            result: (options.input ?? "").includes("Create an implementation plan")
+              ? "- [ ] Create index.html\n- [ ] Add controls\n- [ ] Verify output"
+              : "implemented from ultrawork plan"
+          }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.runCommandTool({
+      command: "/ultrawork build a dashboard",
+      workspace,
+      planId: "ultrawork-plan",
+      runId: "ultrawork-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.command, "ultrawork");
+    assert.equal(result.structuredContent?.planId, "ultrawork-plan");
+    assert.equal(result.structuredContent?.taskId, "ultrawork-run");
+    assert.deepEqual(result.structuredContent?.childTaskIds, [
+      "ultrawork-run-part-1",
+      "ultrawork-run-part-2",
+      "ultrawork-run-part-3",
+      "ultrawork-run-review"
+    ]);
+    assert.equal(result.structuredContent?.reviewTaskId, "ultrawork-run-review");
+    const status = await tools.taskStatusTool({ taskId: "ultrawork-run" });
+    assert.deepEqual(status.structuredContent?.childTaskIds, [
+      "ultrawork-run-part-1",
+      "ultrawork-run-part-2",
+      "ultrawork-run-part-3",
+      "ultrawork-run-review"
+    ]);
+    assert.equal(status.structuredContent?.reviewTaskId, "ultrawork-run-review");
+    assert.equal(status.structuredContent?.planId, "ultrawork-plan");
+    const childStatus = await tools.taskStatusTool({ taskId: "ultrawork-run-part-1" });
+    assert.equal(childStatus.structuredContent?.parentTaskId, "ultrawork-run");
+    assert.equal(childStatus.structuredContent?.profile, "multi-coder");
+    assert.match(String(childStatus.structuredContent?.request), /Create index\.html/);
+    const reviewStatus = await tools.taskStatusTool({ taskId: "ultrawork-run-review" });
+    assert.equal(reviewStatus.structuredContent?.parentTaskId, "ultrawork-run");
+    assert.equal(reviewStatus.structuredContent?.profile, "momus");
+    assert.deepEqual(reviewStatus.structuredContent?.dependsOnTaskIds, [
+      "ultrawork-run-part-1",
+      "ultrawork-run-part-2",
+      "ultrawork-run-part-3"
+    ]);
+    await waitFor(() => {
+      const completed = tools.taskStatusTool({ taskId: "ultrawork-run" });
+      return completed.then(status => status.structuredContent?.status === "completed");
+    });
+    const output = await tools.backgroundOutputTool({ taskId: "ultrawork-run" });
+    const artifact = (output.structuredContent?.artifacts as Array<{ path?: string; content?: string }> | undefined)
+      ?.find(item => item.path === "workflow-output.md");
+    assert.ok(artifact);
+    assert.match(artifact.content ?? "", /ultrawork-run-review/);
+    assert.match(artifact.content ?? "", /implemented from ultrawork plan/);
+    const stateArtifact = (output.structuredContent?.artifacts as Array<{ path?: string; content?: string }> | undefined)
+      ?.find(item => item.path === "workflow-state.md");
+    assert.ok(stateArtifact);
+    assert.match(stateArtifact.content ?? "", /Phase: completed/);
+    assert.match(stateArtifact.content ?? "", /Next action: complete/);
+    const plan = await readFile(join(workspace, ".codex-claude", "plans", "ultrawork-plan.md"), "utf8");
+    assert.match(plan, /Create index\.html/);
+  });
+
+  it("auto-dispatches simple implementation requests directly to the coder profile", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-auto-dispatch-direct-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "implemented tetris" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.autoDispatchTool({
+      workspace,
+      request: "让 Claude 写一个俄罗斯方块 HTML 游戏",
+      runId: "auto-direct-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.strategy, "direct");
+    assert.equal(result.structuredContent?.taskId, "auto-direct-run");
+    const status = await tools.taskStatusTool({ taskId: "auto-direct-run" });
+    assert.equal(status.structuredContent?.profile, "coder");
+    assert.deepEqual(status.structuredContent?.stages, ["implement"]);
+  });
+
+  it("auto-dispatches plan strategy through create plan then execute plan", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-auto-dispatch-plan-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({
+            result: (options.input ?? "").includes("Create an implementation plan")
+              ? "- [ ] Create index.html\n- [ ] Verify the game"
+              : "implemented from plan"
+          }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.autoDispatchTool({
+      workspace,
+      request: "先规划再实现一个复杂的游戏",
+      strategy: "plan",
+      planId: "auto-plan",
+      runId: "auto-plan-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.equal(result.structuredContent?.strategy, "plan");
+    assert.equal(result.structuredContent?.planId, "auto-plan");
+    assert.equal(result.structuredContent?.taskId, "auto-plan-run");
+    const plan = await readFile(join(workspace, ".codex-claude", "plans", "auto-plan.md"), "utf8");
+    assert.match(plan, /Create index\.html/);
+  });
+
   it("runs synchronous delegated tasks with preferred agent routing", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-delegate-test-"));
     const tools = await createTestTaskTools({
@@ -166,6 +417,44 @@ describe("delegate task MCP tools", () => {
 
     const status = await tools.taskStatusTool({ taskId });
     assert.equal(status.structuredContent?.status, "cancelled");
+  });
+
+  it("accepts verification options on background delegated tasks", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-delegate-verify-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ result: "done" }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const launched = await tools.delegateTaskTool({
+      mode: "background",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      workspace,
+      request: "Implement login cache",
+      runId: "delegate-verify-run",
+      verifyCommand: `${process.execPath} -e "process.exit(0)"`,
+      maxRepairAttempts: 0
+    });
+
+    assert.equal(launched.structuredContent?.ok, true);
+    await waitFor(async () => {
+      const status = await tools.taskStatusTool({ taskId: "delegate-verify-run" });
+      return status.structuredContent?.status === "completed"
+        && (status.structuredContent?.verification as { status?: string } | undefined)?.status === "passed";
+    });
+
+    const status = await tools.taskStatusTool({ taskId: "delegate-verify-run" });
+    assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Verification: passed/);
+    assert.equal(status.structuredContent?.verifyCommand, `${process.execPath} -e "process.exit(0)"`);
   });
 
   it("reads background output artifacts", async () => {
@@ -303,6 +592,14 @@ describe("delegate task MCP tools", () => {
     const catalog = await tools.agentCatalogTool();
     assert.equal(catalog.structuredContent?.ok, true);
     assert.ok(Array.isArray(catalog.structuredContent?.profiles));
+    const agents = catalog.structuredContent?.agents as Array<{ name?: string }> | undefined;
+    assert.ok(agents?.some(agent => agent.name === "codex-cli"));
+    assert.ok(agents?.some(agent => agent.name === "gemini"));
+    assert.ok(agents?.some(agent => agent.name === "opencode"));
+    const profiles = catalog.structuredContent?.profiles as Array<{ name?: string; rolePrompt?: string }> | undefined;
+    assert.ok(profiles?.some(profile => profile.name === "prometheus" && /Prometheus/.test(profile.rolePrompt ?? "")));
+    assert.ok(profiles?.some(profile => profile.name === "sisyphus" && /Sisyphus/.test(profile.rolePrompt ?? "")));
+    assert.ok(profiles?.some(profile => profile.name === "momus" && /Momus/.test(profile.rolePrompt ?? "")));
   });
 
   it("uses external config for profile routing", async () => {
@@ -539,4 +836,13 @@ async function createTestTaskTools(options: Parameters<typeof createTaskTools>[0
     ...options,
     taskStore: new TaskStore({ rootDir })
   });
+}
+
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail("Timed out waiting for condition");
 }

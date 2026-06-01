@@ -1,4 +1,5 @@
 import type { AgentProvider } from "./AgentProvider.js";
+import { appendFileSync, readFileSync } from "node:fs";
 import type { StageInput, StageResult } from "../types.js";
 import { buildStagePrompt } from "../prompts/stagePrompts.js";
 import { ResultStore } from "../storage/ResultStore.js";
@@ -9,23 +10,35 @@ import { resolveClaudeSessionInfo } from "./ClaudeSessionResolver.js";
 type ExecFn = (
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; input?: string; signal?: AbortSignal }
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    input?: string;
+    signal?: AbortSignal;
+    onStdoutChunk?: (chunk: string) => void;
+    onStderrChunk?: (chunk: string) => void;
+  }
 ) => Promise<ExecResult>;
 
 export interface ClaudeCodeAgentOptions {
   claudePath?: string;
+  defaultModel?: string;
   exec?: ExecFn;
   getChangedFiles?: (workspace: string) => Promise<string[]>;
 }
 
+const DEFAULT_CLAUDE_MODEL = "pa/claude-opus-4-7";
+
 export class ClaudeCodeAgent implements AgentProvider {
   readonly name = "claude" as const;
   private readonly claudePath: string;
+  private readonly defaultModel: string;
   private readonly exec: ExecFn;
   private readonly getChangedFiles: (workspace: string) => Promise<string[]>;
 
   constructor(options: ClaudeCodeAgentOptions = {}) {
     this.claudePath = options.claudePath ?? "claude";
+    this.defaultModel = options.defaultModel ?? process.env.CODEX_CLAUDE_MODEL ?? DEFAULT_CLAUDE_MODEL;
     this.exec = options.exec ?? execFileCapture;
     this.getChangedFiles = options.getChangedFiles ?? changedFiles;
   }
@@ -36,6 +49,8 @@ export class ClaudeCodeAgent implements AgentProvider {
     const prompt = buildStagePrompt({ ...input, runId });
     await store.writeStageInput(runId, input.stage, prompt);
     const logPath = await store.writeLog(runId, `claude-${input.stage}.log`, "");
+    const stdoutPath = await store.writeLog(runId, `claude-${input.stage}.stdout.jsonl`, "");
+    const stderrPath = await store.writeLog(runId, `claude-${input.stage}.stderr.log`, "");
     const defaultDisallowedTools = input.stage === "implement" ? [] : ["Edit", "MultiEdit", "Write", "NotebookEdit"];
     const permissionMode = input.permission?.mode ?? (input.stage === "implement" ? "bypassPermissions" : "default");
     const allowedTools = input.permission?.allowedTools ?? [];
@@ -43,7 +58,9 @@ export class ClaudeCodeAgent implements AgentProvider {
     const args = [
       "-p",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
       "--permission-mode",
       permissionMode,
       "--debug-file",
@@ -59,7 +76,8 @@ export class ClaudeCodeAgent implements AgentProvider {
       args.push("--disallowedTools", disallowedTools.join(","));
     }
 
-    if (input.model) args.push("--model", input.model);
+    const model = input.model ?? this.defaultModel;
+    if (model) args.push("--model", model);
     if (input.effort) args.push("--effort", input.effort);
 
     const startedAt = new Date();
@@ -67,8 +85,12 @@ export class ClaudeCodeAgent implements AgentProvider {
       cwd: input.workspace,
       timeoutMs: input.timeoutMs ?? 15 * 60 * 1000,
       input: prompt,
-      signal: input.signal
+      signal: input.signal,
+      onStdoutChunk: chunk => appendFileSync(stdoutPath, chunk, "utf8"),
+      onStderrChunk: chunk => appendFileSync(stderrPath, chunk, "utf8")
     });
+    if (result.stdout) appendMissingContent(stdoutPath, result.stdout);
+    if (result.stderr) appendMissingContent(stderrPath, result.stderr);
 
     const outputText = extractClaudeOutput(result.stdout);
     const outputPath = await store.writeStageOutput(runId, input.stage, outputText);
@@ -86,6 +108,8 @@ export class ClaudeCodeAgent implements AgentProvider {
         error = "Claude command timed out";
       } else if (result.stderr) {
         error = result.stderr;
+      } else if (outputText.trim()) {
+        error = outputText.trim();
       } else {
         const detail = result.stdout
           ? `empty stderr (exit code ${result.code})`
@@ -135,7 +159,32 @@ function extractClaudeOutput(stdout: string): string {
   } catch {
     // Fall through to raw output.
   }
+  const streamResult = extractStreamResult(stdout);
+  if (streamResult) return streamResult;
   return stdout;
+}
+
+function extractStreamResult(stdout: string): string | undefined {
+  for (const line of stdout.trim().split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as { result?: unknown };
+      if (typeof parsed.result === "string") return parsed.result;
+    } catch {
+      // Ignore non-JSON stream lines.
+    }
+  }
+  return undefined;
+}
+
+function appendMissingContent(path: string, content: string): void {
+  // Injected test executors usually return captured stdout/stderr without invoking chunk callbacks.
+  // Real spawned executors write chunks as they arrive, so avoid duplicating those files.
+  try {
+    if (readFileSync(path, "utf8").length === 0) appendFileSync(path, content, "utf8");
+  } catch {
+    appendFileSync(path, content, "utf8");
+  }
 }
 
 function createRunId(): string {

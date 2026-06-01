@@ -2,14 +2,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentProfile, CategoryDefinition } from "../agents/AgentRegistry.js";
+import type { CommandDefinition } from "../commands/CommandRegistry.js";
 
 export interface BridgeConfig {
   claudePath?: string;
+  codexPath?: string;
+  geminiPath?: string;
+  opencodePath?: string;
+  commands?: Record<string, Partial<CommandDefinition>>;
   categories?: Record<string, Partial<CategoryDefinition>>;
   profiles?: Record<string, Partial<AgentProfile>>;
   skills?: Record<string, SkillConfig>;
   defaults?: {
     timeoutMs?: number;
+    claudeModel?: string;
   };
   concurrency?: {
     maxRunning?: number;
@@ -46,16 +52,26 @@ function normalizeConfig(value: unknown): BridgeConfig {
   if (!isRecord(value)) return {};
   return {
     claudePath: typeof value.claudePath === "string" ? value.claudePath : undefined,
+    codexPath: typeof value.codexPath === "string" ? value.codexPath : undefined,
+    geminiPath: typeof value.geminiPath === "string" ? value.geminiPath : undefined,
+    opencodePath: typeof value.opencodePath === "string" ? value.opencodePath : undefined,
+    commands: normalizeRecord(value.commands),
     categories: normalizeRecord(value.categories),
     profiles: normalizeRecord(value.profiles),
     skills: normalizeRecord(value.skills),
-    defaults: isRecord(value.defaults) && typeof value.defaults.timeoutMs === "number"
-      ? { timeoutMs: value.defaults.timeoutMs }
-      : undefined,
+    defaults: normalizeDefaults(value.defaults),
     concurrency: isRecord(value.concurrency) && typeof value.concurrency.maxRunning === "number"
       ? { maxRunning: value.concurrency.maxRunning }
       : undefined
   };
+}
+
+function normalizeDefaults(value: unknown): BridgeConfig["defaults"] {
+  if (!isRecord(value)) return undefined;
+  const defaults: NonNullable<BridgeConfig["defaults"]> = {};
+  if (typeof value.timeoutMs === "number") defaults.timeoutMs = value.timeoutMs;
+  if (typeof value.claudeModel === "string") defaults.claudeModel = value.claudeModel;
+  return Object.keys(defaults).length > 0 ? defaults : undefined;
 }
 
 function normalizeRecord(value: unknown): Record<string, Record<string, unknown>> | undefined {

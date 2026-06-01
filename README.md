@@ -4,7 +4,55 @@ Local bridge for letting Codex Desktop delegate selected stages to the installed
 
 ## Usage From Codex Desktop
 
-The preferred Codex Desktop integration is the MCP server:
+The easiest Codex Desktop integration is the unified MCP + Dashboard runtime:
+
+```bash
+npm install -g codex-claude-agent-bridge
+claude-agent-bridge setup-codex
+```
+
+`setup-codex` prints the exact TOML that should be present in Codex config without changing files. After checking it, write it into `~/.codex/config.toml`:
+
+```bash
+claude-agent-bridge setup-codex --write
+```
+
+You can also point at explicit provider executables when Codex Desktop cannot inherit your shell `PATH`:
+
+```bash
+claude-agent-bridge setup-codex --write \
+  --claude-path /Users/me/.local/bin/claude \
+  --codex-path /opt/homebrew/bin/codex \
+  --gemini-path /opt/homebrew/bin/gemini \
+  --opencode-path /opt/homebrew/bin/opencode
+```
+
+For a local checkout or git install, build first and then run the same setup command:
+
+```bash
+npm install
+npm run build
+node dist/src/cli.js setup-codex --write
+```
+
+The setup command installs this MCP block by default:
+
+```toml
+[mcp_servers.claude-agent-bridge]
+command = "node"
+args = ["/absolute/path/to/dist/src/mcpDashboardServer.js", "--port", "8787"]
+env_vars = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+
+[mcp_servers.claude-agent-bridge.env]
+CLAUDE_CODE_PATH = "claude"
+CODEX_CLI_PATH = "codex"
+GEMINI_CLI_PATH = "gemini"
+OPENCODE_CLI_PATH = "opencode"
+```
+
+This unified runtime starts MCP over stdio and a Dashboard on `http://127.0.0.1:8787` in the same process. Dashboard status and MCP tools see the same running tasks, so Dashboard can inspect, cancel, retry, and resume live work.
+
+Manual registration still works if you prefer using Codex CLI directly:
 
 ```bash
 npm install
@@ -19,8 +67,6 @@ npm install
 npm run build
 codex mcp add claude-agent-bridge -- node "$PWD/dist/src/mcpDashboardServer.js" --port 8787
 ```
-
-The unified runtime starts MCP over stdio and a Dashboard on `http://127.0.0.1:8787` in the same process. Dashboard status and MCP tools see the same running tasks, so Dashboard can cancel live `pending` or `running` tasks.
 
 Claude Code CLI authentication must be visible to the MCP server process. For this machine, keep these environment variable names available to Codex:
 
@@ -81,7 +127,19 @@ Claude stage results also include traceability fields when the Claude session ca
 - `agentTranscriptPath`: local Claude transcript JSONL path
 - `resumeCommand`: command to resume the Claude session from the correct workspace
 
-`delegate_task` is the higher-level orchestration entry point inspired by Oh My OpenCode's `delegate_task` pattern:
+`auto_dispatch` is the natural-language entry point for users who do not want to choose stages or profiles manually:
+
+- `workspace`: absolute workspace path
+- `request`: natural-language task request
+- `mode`: `sync` or `background` (default: `background`)
+- `strategy`: `auto`, `direct`, or `plan`
+- `planId`: optional plan id when the strategy resolves to `plan`
+- `preferredAgent`: optional explicit provider override, such as `claude`, `codex-cli`, `gemini`, `opencode`, or `codex`
+- `runId`, `agentSessionId`, `loadSkills`, `model`, `effort`, `timeoutMs`: optional execution controls
+
+With `strategy: auto`, the bridge uses simple, explainable heuristics. Straight implementation requests route directly to the `coder` profile. Requests that explicitly ask to plan first, or include signals such as complex, refactor, architecture, or multi-step work, create a saved plan and then launch execution from that plan.
+
+`delegate_task` is the lower-level orchestration entry point inspired by Oh My OpenCode's `delegate_task` pattern:
 
 - `mode`: `sync` or `background` (default: `sync`)
 - `stage`: single stage to run
@@ -91,7 +149,7 @@ Claude stage results also include traceability fields when the Claude session ca
 - `category`: routing category, such as `planning`, `coding`, `review`, `analysis`, `fast`, or `heavy`
 - `profile`: named routing profile, such as `planner`, `coder`, `reviewer`, `analyst`, `quick`, or `heavy-coder`
 - `autoCategory`: infer category and default stage from the request when no routing override is provided
-- `preferredAgent`: explicit agent override, `claude` or `codex`
+- `preferredAgent`: explicit agent override, `claude`, `codex-cli`, `gemini`, `opencode`, or `codex`
 - `agentSessionId`: optional Claude Code session id to resume when a Claude stage runs
 - `loadSkills`: configured skill names to inject into the delegated prompt
 - `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
@@ -105,13 +163,51 @@ Background tasks return a `taskId`. Use:
 - `task_retry`: start a fresh background retry from a previous task
 - `task_resume`: start a background retry that resumes the latest Claude session from a previous task
 - `agent_catalog`: list available agents, categories, and profiles
+- `provider_doctor`: check local provider CLI availability and versions
+- `command_catalog`: list slash-style command templates
+- `run_command`: run a command template such as `/ultrawork Build a game`
+- `code_symbols`: parse a TypeScript/JavaScript file with AST and list classes, interfaces, functions, methods, variables, types, and enums
+- `code_definition`: use TypeScript language service or a configured language server to find symbol definitions at a file position
+- `code_references`: use TypeScript language service or a configured language server to find symbol references at a file position
+- `code_diagnostics`: use TypeScript language service or a configured language server to return syntactic and semantic diagnostics
+
+Command templates:
+
+- `/start-work <request>`: run `auto_dispatch` in background mode
+- `/plan-work <request>`: create a saved plan
+- `/ultrawork <request>`: create a saved plan with `prometheus`, then launch implementation with `multi-coder` provider fallback
+- `/review-work <request>`: launch a reviewer task
+- `/multi-work <request>`: launch implementation with `multi-coder` provider fallback
 
 Plan-driven workflow tools:
 
 - `create_plan`: generate a markdown implementation plan and save it under `<workspace>/.codex-claude/plans/<planId>.md`
 - `execute_plan`: read a saved plan and delegate the implementation to an executor agent
 
-Task metadata is persisted under `~/.codex-claude/tasks/<taskId>.json`, so `task_status`, `task_list`, and `background_output` can inspect completed tasks after the MCP server restarts. If a saved task was `pending` or `running` when the server restarted, it is reported as `interrupted`; use its `resumeCommand` or `agentSessionId` to continue the Claude session.
+Every delegated stage now receives an automatic workspace context block before the user request. The context is generated from lightweight, read-only inspection of the target workspace: known docs such as `README.md`, manifests such as `package.json` or `go.mod`, detected source-language counts, and a compact code map from `code_symbols`. The prompt also tells agents to prefer `code_symbols`, `code_definition`, `code_references`, and `code_diagnostics` when those tools are available, so large existing projects can be explored with less blind text search.
+
+Code intelligence tools are read-only. `code_symbols` supports TypeScript, JavaScript, Python, Java, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, and Ruby. TypeScript and JavaScript use the TypeScript compiler AST; the other languages use lightweight syntax-aware symbol extraction for classes, interfaces, structs, functions, methods, traits, protocols, modules, and related top-level constructs.
+
+`code_definition`, `code_references`, and `code_diagnostics` use the TypeScript language service for TypeScript and JavaScript. For other languages, they use a generic stdio LSP adapter. The built-in LSP command mapping is:
+
+- Python: `pyright-langserver --stdio`
+- Java: `jdtls`
+- Go: `gopls serve`
+- Rust: `rust-analyzer`
+- C/C++: `clangd`
+- C#: `csharp-ls`
+- Kotlin: `kotlin-language-server`
+- Swift: `sourcekit-lsp`
+- PHP: `intelephense --stdio`
+- Ruby: `solargraph stdio`
+
+The LSP tools also accept `lspCommand`, `lspArgs`, and `lspTimeoutMs` for explicit per-call overrides. Environment variables such as `PYRIGHT_LANGSERVER_PATH`, `JDTLS_PATH`, `GOPLS_PATH`, `RUST_ANALYZER_PATH`, `CLANGD_PATH`, `CSHARP_LS_PATH`, `KOTLIN_LANGUAGE_SERVER_PATH`, `SOURCEKIT_LSP_PATH`, `INTELEPHENSE_PATH`, and `SOLARGRAPH_PATH` can override default executable names. Positions are 1-based line and column numbers, matching editor UI conventions.
+
+`provider_doctor` also reports language server health. The Dashboard shows a compact `Language servers` summary under `Provider health`, with a collapsible list for Python, Java, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, and Ruby. Missing language servers do not block `code_symbols`, but definition, references, and diagnostics for that language need the corresponding server installed.
+
+Task metadata is persisted under `~/.codex-claude/tasks/<taskId>.json`, so `task_status`, `task_list`, and `background_output` can inspect completed tasks after the MCP server restarts. Persisted task metadata includes requested execution controls such as `model`, `effort`, `timeoutMs`, and injected `skills`; `task_retry` and `task_resume` preserve those controls when launching the follow-up task. If a saved task was `pending` or `running` when the server restarted, it is reported as `interrupted`; use its `resumeCommand` or `agentSessionId` to continue the Claude session.
+
+Workflow parent tasks also persist a long-running state file under `<workspace>/.codex-claude/workflows/<workflowId>.json`. The state tracks phase (`executing`, `reviewing`, `completed`, or failure states), step-to-task mapping, next action, child task statuses, and compact learnings from completed agents. `background_output` exposes this as `workflow-state.md`, and the Dashboard renders it in the task detail panel.
 
 Artifacts still persist under `.agent-runs/<run-id>/`.
 Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-workspace>/<session-id>.jsonl`; the bridge surfaces the resolved path when available.
@@ -122,7 +218,7 @@ Claude transcripts are stored by Claude Code under `~/.claude/projects/<encoded-
 Use background_output with taskId="<task-id>", cursor=0.
 ```
 
-The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new output/log/transcript content. Calls without a cursor include current artifact/log tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline. When a task is tied to a plan file, the response also includes `planSummary` with checklist progress.
+The response includes `events`, `cursor`, and `nextCursor`. Pass `nextCursor` into the next call to receive only new input/result/CLI stream/log/transcript content. Calls without a cursor include current input, parsed result, raw Claude CLI stdout stream, stderr, debug log, and transcript tails for compatibility. When a Claude transcript is available, the response also includes a structured transcript summary with model names, tool calls, file writes, token usage, and a compact timeline. When a task is tied to a plan file, the response also includes `planSummary` with checklist progress.
 
 ## Plan Workflow
 
@@ -189,12 +285,35 @@ npm run mcp-dashboard -- --port 8787
 
 In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboard can:
 
+- submit natural-language work through Auto Dispatch
+- run slash-style command templates
 - create a normal delegated task
 - create a saved implementation plan
 - execute a saved plan
+- set requested `model`, `effort`, `timeoutMs`, and configured skills for new work
+- show requested model controls next to actual Claude transcript models
+- show profile and category defaults from `agent_catalog`
+- show provider health for Claude, Codex CLI, Gemini, and OpenCode
+- launch stability runs that execute the same task across Claude, Codex CLI, Gemini, or other configured providers for multiple iterations
+- persist stability run summaries under `~/.codex-claude/stability/*.json`, including success rate, failed counts, average duration, failure samples, and per-task status
+- inspect task input, parsed result, raw Claude CLI stream, stderr, debug log, and transcript tail in the Live I/O panel
 - cancel currently `pending` or `running` tasks
 - retry `failed`, `interrupted`, or `cancelled` tasks
 - resume a failed/interrupted/cancelled Claude task when a session id is available
+
+The Dashboard starts in Simple mode. Simple mode keeps the creation form focused on Workspace, Request, Command, and Agent, and shows the task list, task detail, and provider health. Advanced mode exposes lower-level orchestration controls such as Auto Dispatch, Delegate Task, Create Plan, Execute Plan, profile, stage, requested model, effort, timeout, skills, the agent defaults catalog, and stability run reports.
+
+For a real long-running comparison, open Advanced mode and use Stability runs:
+
+```text
+Workspace root: /tmp/codex-claude-stability
+Providers: claude,codex-cli,gemini
+Iterations: 3
+Request: Create a small HTML game and include a short README describing how to run it.
+Verify command: optional shell command, for example npm test
+```
+
+Each provider and iteration gets an isolated workspace under `<workspace root>/<run id>/`. The report updates as tasks finish and can be cancelled while running.
 
 The shared runtime writes its Dashboard URL to stderr so MCP stdout stays protocol-clean. The task creation panel is hidden when running the standalone read-only dashboard.
 
@@ -223,6 +342,9 @@ Example:
 ```json
 {
   "claudePath": "/Users/me/.local/bin/claude",
+  "codexPath": "/Applications/Codex.app/Contents/Resources/codex",
+  "geminiPath": "/opt/homebrew/bin/gemini",
+  "opencodePath": "/opt/homebrew/bin/opencode",
   "defaults": {
     "timeoutMs": 900000
   },
@@ -235,6 +357,15 @@ Example:
     },
     "project-rules": {
       "path": "./docs/project-rules.md"
+    }
+  },
+  "commands": {
+    "frontend-work": {
+      "description": "Build frontend tasks with the frontend skill and multi-provider fallback",
+      "action": "delegate_task",
+      "stage": "implement",
+      "profile": "multi-coder",
+      "loadSkills": ["html-game"]
     }
   },
   "profiles": {
@@ -250,7 +381,7 @@ Example:
         "allowedTools": ["Bash(npm test *)", "Read"],
         "disallowedTools": ["NotebookEdit"]
       },
-      "fallbacks": [{ "agent": "codex" }]
+      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "codex" }]
     }
   },
   "categories": {
@@ -263,7 +394,7 @@ Example:
         "allowedTools": ["Bash(git diff *)"],
         "disallowedTools": ["Write", "Edit"]
       },
-      "fallbacks": [{ "agent": "codex" }]
+      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "codex" }]
     }
   }
 }
@@ -293,6 +424,9 @@ Named profiles:
 
 - `planner`: Codex plan stage
 - `coder`: Claude implement stage
+- `codex-coder`: Codex CLI implement stage
+- `gemini-coder`: Gemini CLI implement stage
+- `multi-coder`: Claude implement stage with Codex CLI, Gemini, then Codex handoff fallback
 - `reviewer`: Codex review stage
 - `analyst`: Codex analyze stage
 - `quick`: low-effort Codex handoff
@@ -300,16 +434,22 @@ Named profiles:
 
 Routing precedence is: `preferredAgent` > `profile` > `category` > explicit per-stage routing > stage defaults. If no `stage`, `stages`, `category`, `profile`, or `preferredAgent` is provided, `delegate_task` infers a category from the request and chooses the default stage for that category.
 
-`coding`, `heavy`, `coder`, and `heavy-coder` include a runtime fallback chain: try Claude first, then fall back to Codex with `requiresCodex: true` if Claude fails. Explicit `preferredAgent` disables fallback because the caller has chosen a concrete agent.
+`coding`, `heavy`, `coder`, `multi-coder`, and `heavy-coder` include a runtime fallback chain: try Claude first, then Codex CLI, then Gemini CLI, then Codex handoff with `requiresCodex: true` if local provider CLIs fail. Explicit `preferredAgent` disables fallback because the caller has chosen a concrete agent.
 
 ## Agents
 
-- `claude`: invokes the local Claude Code CLI with `claude -p --output-format json`
+- `claude`: invokes the local Claude Code CLI with streaming JSON output
+- `codex-cli`: invokes the local Codex CLI with `codex exec --json`
+- `gemini`: invokes the local Gemini CLI with `gemini --prompt --output-format stream-json`
+- `opencode`: optional OpenCode CLI provider when installed/configured
 - `codex`: returns `requiresCodex: true` so the current Codex Desktop session handles the stage
+
+Provider executable paths can be configured with `claudePath`, `codexPath`, `geminiPath`, and `opencodePath` in `codex-claude.config.json`, or with `CLAUDE_CODE_PATH`, `CODEX_CLI_PATH`, `GEMINI_CLI_PATH`, and `OPENCODE_CLI_PATH`.
 
 ## Safety
 
 - Claude Code runs only in the provided workspace.
+- If your Claude Code default model returns `role 'system' is not supported`, choose a working Claude model explicitly in Dashboard Advanced mode or pass `model` in MCP calls. On this machine, `pa/claude-opus-4-7` worked for the real workflow smoke test.
 - `plan`, `review`, and `analyze` use Claude permission mode `default` with edit tools disabled.
 - `implement` uses Claude permission mode `bypassPermissions` so Claude Code can run implementation commands without permission prompts.
 - Profiles and categories can override Claude `permission.mode`, `allowedTools`, and `disallowedTools` in config.

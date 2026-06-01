@@ -37,6 +37,7 @@ export interface AgentProfile {
   timeoutMs?: number;
   permission?: PermissionPolicy;
   fallbacks?: AgentRouteCandidate[];
+  rolePrompt?: string;
 }
 
 export interface TaskClassificationInput {
@@ -56,6 +57,24 @@ const agents: Record<AgentName, AgentDefinition> = {
     description: "Current Codex Desktop session for review, analysis, and handoff work.",
     defaultStages: ["plan", "review", "analyze"],
     categories: ["planning", "review", "analysis", "fast"]
+  },
+  "codex-cli": {
+    name: "codex-cli",
+    description: "Local Codex CLI provider for non-interactive delegated work.",
+    defaultStages: ["plan", "implement", "review", "analyze"],
+    categories: ["coding", "heavy", "review", "analysis"]
+  },
+  gemini: {
+    name: "gemini",
+    description: "Local Gemini CLI provider for headless delegated work.",
+    defaultStages: ["plan", "implement", "review", "analyze"],
+    categories: ["coding", "heavy", "planning", "analysis"]
+  },
+  opencode: {
+    name: "opencode",
+    description: "Optional OpenCode CLI provider when installed and configured.",
+    defaultStages: ["plan", "implement", "review", "analyze"],
+    categories: ["coding", "heavy", "planning", "analysis"]
   }
 };
 
@@ -69,7 +88,7 @@ const categories: Record<string, CategoryDefinition> = {
     name: "coding",
     description: "Implementation work that may edit files and run commands.",
     agent: "claude",
-    fallbacks: [{ agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
   },
   review: {
     name: "review",
@@ -91,7 +110,7 @@ const categories: Record<string, CategoryDefinition> = {
     description: "Heavier delegated work for Claude Code.",
     agent: "claude",
     effort: "high",
-    fallbacks: [{ agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }]
   }
 };
 
@@ -101,7 +120,8 @@ const profiles: Record<string, AgentProfile> = {
     description: "Read-only planning and decomposition handled by Codex.",
     category: "planning",
     agent: "codex",
-    stages: ["plan"]
+    stages: ["plan"],
+    rolePrompt: "You are a planner. Decompose the request into scoped steps, risks, and verification. Do not modify files."
   },
   coder: {
     name: "coder",
@@ -109,7 +129,76 @@ const profiles: Record<string, AgentProfile> = {
     category: "coding",
     agent: "claude",
     stages: ["implement"],
-    fallbacks: [{ agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
+  },
+  "codex-coder": {
+    name: "codex-coder",
+    description: "Implementation work handled by local Codex CLI.",
+    category: "coding",
+    agent: "codex-cli",
+    stages: ["implement"]
+  },
+  "gemini-coder": {
+    name: "gemini-coder",
+    description: "Implementation work handled by local Gemini CLI.",
+    category: "coding",
+    agent: "gemini",
+    stages: ["implement"]
+  },
+  "multi-coder": {
+    name: "multi-coder",
+    description: "Implementation with provider fallback: Claude, Codex CLI, Gemini, then Codex handoff.",
+    category: "coding",
+    agent: "claude",
+    stages: ["implement"],
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
+  },
+  explore: {
+    name: "explore",
+    description: "Read-only codebase exploration agent. Maps files, patterns, dependencies, and risks.",
+    category: "analysis",
+    agent: "codex",
+    stages: ["analyze"],
+    rolePrompt: "You are Explore. Inspect the workspace without editing files. Map relevant files, APIs, patterns, dependencies, and unknowns. Return concise findings and recommended next steps."
+  },
+  prometheus: {
+    name: "prometheus",
+    description: "Strategic planning agent for implementation plans with checklist steps.",
+    category: "planning",
+    agent: "claude",
+    stages: ["plan"],
+    permission: { mode: "default", disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"] },
+    rolePrompt: "You are Prometheus. Create a high-quality implementation plan. Clarify scope, identify guardrails, include exact files or areas to inspect, and produce markdown checklist steps. Do not edit source files."
+  },
+  sisyphus: {
+    name: "sisyphus",
+    description: "Execution agent for scoped implementation work with verification.",
+    category: "coding",
+    agent: "claude",
+    stages: ["implement"],
+    effort: "high",
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }],
+    rolePrompt: "You are Sisyphus. Execute the implementation task completely. Keep changes scoped, update only necessary files, run relevant verification, and report changed files and test results. Do not commit."
+  },
+  momus: {
+    name: "momus",
+    description: "Strict review agent for plans or code changes.",
+    category: "review",
+    agent: "claude",
+    stages: ["review"],
+    permission: { mode: "default", disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"] },
+    fallbacks: [{ agent: "codex-cli", effort: "medium" }, { agent: "gemini" }, { agent: "codex" }],
+    rolePrompt: "You are Momus. Be a strict reviewer. Prioritize correctness bugs, regressions, missing tests, unclear assumptions, and incomplete verification. Return findings first with concrete file or plan references."
+  },
+  frontend: {
+    name: "frontend",
+    description: "Frontend implementation agent focused on usable UI, responsive layout, and browser verification.",
+    category: "coding",
+    agent: "claude",
+    stages: ["implement"],
+    effort: "high",
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }],
+    rolePrompt: "You are Frontend. Build the actual usable interface first, keep layout responsive, avoid text overlap, and verify in a browser when applicable. Keep changes scoped and do not commit."
   },
   reviewer: {
     name: "reviewer",
@@ -141,7 +230,7 @@ const profiles: Record<string, AgentProfile> = {
     stages: ["implement"],
     effort: "high",
     timeoutMs: 900_000,
-    fallbacks: [{ agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }]
   }
 };
 

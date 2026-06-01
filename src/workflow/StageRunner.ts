@@ -4,6 +4,10 @@ import type { AgentName, StageInput, StageResult } from "../types.js";
 export class StageRunner {
   constructor(private readonly providers: Partial<Record<AgentName, AgentProvider>>) {}
 
+  hasProvider(agent: AgentName): boolean {
+    return this.providers[agent] !== undefined;
+  }
+
   async run(input: StageInput): Promise<StageResult> {
     if (input.signal?.aborted) {
       return {

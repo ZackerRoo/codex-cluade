@@ -12,7 +12,10 @@ describe("loadBridgeConfig", () => {
     await mkdir(dir, { recursive: true });
     await writeFile(path, JSON.stringify({
       claudePath: "/tmp/claude",
-      defaults: { timeoutMs: 123 },
+      codexPath: "/tmp/codex",
+      geminiPath: "/tmp/gemini",
+      opencodePath: "/tmp/opencode",
+      defaults: { timeoutMs: 123, claudeModel: "pa/claude-opus-4-7" },
       concurrency: { maxRunning: 2 },
       profiles: {
         coder2: {
@@ -26,7 +29,11 @@ describe("loadBridgeConfig", () => {
 
     const config = loadBridgeConfig(dir, { CODEX_CLAUDE_CONFIG: path });
     assert.equal(config.claudePath, "/tmp/claude");
+    assert.equal(config.codexPath, "/tmp/codex");
+    assert.equal(config.geminiPath, "/tmp/gemini");
+    assert.equal(config.opencodePath, "/tmp/opencode");
     assert.equal(config.defaults?.timeoutMs, 123);
+    assert.equal(config.defaults?.claudeModel, "pa/claude-opus-4-7");
     assert.equal(config.concurrency?.maxRunning, 2);
     assert.equal(config.profiles?.coder2?.agent, "claude");
   });

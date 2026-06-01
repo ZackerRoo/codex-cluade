@@ -8,8 +8,9 @@ import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "./mcp/too
 
 const stageSchema = z.enum(["plan", "implement", "review", "analyze"]);
 const effortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]).optional();
-const agentSchema = z.enum(["claude", "codex"]).optional();
+const agentSchema = z.enum(["claude", "codex", "codex-cli", "gemini", "opencode"]).optional();
 const modeSchema = z.enum(["sync", "background"]).optional();
+const autoDispatchStrategySchema = z.enum(["auto", "direct", "plan"]).optional();
 
 export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServer {
   const server = new McpServer({
@@ -17,6 +18,71 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
     version: "0.1.0"
   });
   const taskTools = options.taskTools ?? createTaskTools();
+
+  server.registerTool(
+    "provider_doctor",
+    {
+      title: "Provider doctor",
+      description: "Check local provider CLI availability and version for Claude, Codex CLI, Gemini, and OpenCode.",
+      inputSchema: {},
+      annotations: {
+        title: "Provider doctor",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.providerDoctorTool()
+  );
+
+  server.registerTool(
+    "command_catalog",
+    {
+      title: "Command catalog",
+      description: "List slash-style command templates such as /start-work and /plan-work.",
+      inputSchema: {},
+      annotations: {
+        title: "Command catalog",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.commandCatalogTool()
+  );
+
+  server.registerTool(
+    "run_command",
+    {
+      title: "Run command",
+      description: "Run a slash-style command template through the bridge workflow.",
+      inputSchema: {
+        command: z.string().min(1).describe("Command name or full slash command, such as /start-work build a game."),
+        workspace: z.string().min(1).describe("Absolute workspace path where the command should run."),
+        request: z.string().optional().describe("Request text when not embedded in command."),
+        mode: modeSchema.describe("sync waits for completion; background returns a task id."),
+        strategy: autoDispatchStrategySchema.describe("Optional strategy for auto-dispatch commands."),
+        planId: z.string().optional().describe("Optional plan id for plan commands."),
+        planPath: z.string().optional().describe("Optional plan path for execute-plan commands."),
+        runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
+        agentSessionId: z.string().optional().describe("Optional Claude session id to resume when Claude runs."),
+        preferredAgent: agentSchema.describe("Optional explicit agent override."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into delegated prompts."),
+        model: z.string().optional().describe("Optional model argument for compatible providers."),
+        effort: effortSchema.describe("Optional effort level."),
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds."),
+        verifyCommand: z.string().optional().describe("Optional shell command to verify the completed task, such as npm test."),
+        maxRepairAttempts: z.number().int().min(0).optional().describe("How many automatic repair tasks to launch when verification fails.")
+      },
+      annotations: {
+        title: "Run command",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.runCommandTool(args)
+  );
 
   server.registerTool(
     "claude_run_stage",
@@ -46,6 +112,38 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "auto_dispatch",
+    {
+      title: "Auto dispatch",
+      description:
+        "Natural-language task entrypoint. Chooses direct Claude implementation or a create_plan then execute_plan workflow.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path where the task should run."),
+        request: z.string().min(1).describe("Natural-language user request."),
+        mode: modeSchema.describe("sync waits for completion; background returns a task id."),
+        strategy: autoDispatchStrategySchema.describe("auto infers direct vs plan; direct skips planning; plan creates and executes a saved plan."),
+        planId: z.string().optional().describe("Optional plan id when strategy resolves to plan."),
+        runId: z.string().optional().describe("Optional run id for the implementation task."),
+        agentSessionId: z.string().optional().describe("Optional Claude session id to resume when Claude runs."),
+        preferredAgent: agentSchema.describe("Optional explicit agent override for the selected workflow."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into delegated prompts."),
+        model: z.string().optional().describe("Optional model argument for compatible providers."),
+        effort: effortSchema.describe("Optional effort level."),
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds."),
+        verifyCommand: z.string().optional().describe("Optional shell command to verify the completed implementation."),
+        maxRepairAttempts: z.number().int().min(0).optional().describe("How many automatic repair tasks to launch when verification fails.")
+      },
+      annotations: {
+        title: "Auto dispatch",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.autoDispatchTool(args)
+  );
+
+  server.registerTool(
     "delegate_task",
     {
       title: "Delegate task",
@@ -66,7 +164,9 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
         loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the delegated prompt."),
         model: z.string().optional().describe("Optional model argument for compatible providers."),
         effort: effortSchema.describe("Optional effort level."),
-        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds."),
+        verifyCommand: z.string().optional().describe("Optional shell command to verify the completed task."),
+        maxRepairAttempts: z.number().int().min(0).optional().describe("How many automatic repair tasks to launch when verification fails.")
       },
       annotations: {
         title: "Delegate task",
@@ -122,7 +222,9 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
         loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into the execution prompt."),
         model: z.string().optional().describe("Optional model argument for compatible providers."),
         effort: effortSchema.describe("Optional effort level."),
-        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds.")
+        timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds."),
+        verifyCommand: z.string().optional().describe("Optional shell command to verify the completed plan execution."),
+        maxRepairAttempts: z.number().int().min(0).optional().describe("How many automatic repair tasks to launch when verification fails.")
       },
       annotations: {
         title: "Execute plan",
@@ -202,6 +304,96 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
       }
     },
     async () => taskTools.agentCatalogTool()
+  );
+
+  server.registerTool(
+    "code_symbols",
+    {
+      title: "Code symbols",
+      description: "Use TypeScript/JavaScript AST parsing to list symbols in a source file.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path."),
+        file: z.string().min(1).describe("Workspace-relative or absolute TypeScript/JavaScript file path.")
+      },
+      annotations: {
+        title: "Code symbols",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.codeSymbolsTool(args)
+  );
+
+  server.registerTool(
+    "code_definition",
+    {
+      title: "Code definition",
+      description: "Use the TypeScript language service to find definitions at a file position.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path."),
+        file: z.string().min(1).describe("Workspace-relative or absolute TypeScript/JavaScript file path."),
+        line: z.number().int().positive().describe("1-based line number."),
+        column: z.number().int().positive().describe("1-based column number."),
+        lspCommand: z.string().optional().describe("Optional explicit language server command for non-TypeScript languages."),
+        lspArgs: z.array(z.string()).optional().describe("Optional explicit language server args."),
+        lspTimeoutMs: z.number().int().positive().optional().describe("Optional language server request timeout.")
+      },
+      annotations: {
+        title: "Code definition",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.codeDefinitionTool(args)
+  );
+
+  server.registerTool(
+    "code_references",
+    {
+      title: "Code references",
+      description: "Use the TypeScript language service to find references at a file position.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path."),
+        file: z.string().min(1).describe("Workspace-relative or absolute TypeScript/JavaScript file path."),
+        line: z.number().int().positive().describe("1-based line number."),
+        column: z.number().int().positive().describe("1-based column number."),
+        lspCommand: z.string().optional().describe("Optional explicit language server command for non-TypeScript languages."),
+        lspArgs: z.array(z.string()).optional().describe("Optional explicit language server args."),
+        lspTimeoutMs: z.number().int().positive().optional().describe("Optional language server request timeout.")
+      },
+      annotations: {
+        title: "Code references",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.codeReferencesTool(args)
+  );
+
+  server.registerTool(
+    "code_diagnostics",
+    {
+      title: "Code diagnostics",
+      description: "Use the TypeScript language service to report syntactic and semantic diagnostics.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path."),
+        files: z.array(z.string()).optional().describe("Optional workspace-relative or absolute files to inspect."),
+        maxDiagnostics: z.number().int().positive().optional().describe("Maximum diagnostics to return."),
+        lspCommand: z.string().optional().describe("Optional explicit language server command for non-TypeScript languages."),
+        lspArgs: z.array(z.string()).optional().describe("Optional explicit language server args."),
+        lspTimeoutMs: z.number().int().positive().optional().describe("Optional language server request timeout.")
+      },
+      annotations: {
+        title: "Code diagnostics",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.codeDiagnosticsTool(args)
   );
 
   server.registerTool(
