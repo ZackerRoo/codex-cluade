@@ -51,7 +51,8 @@ const specs: Array<{ provider: AgentName; pathKey?: keyof BridgeConfig; envKey?:
   { provider: "claude", pathKey: "claudePath", envKey: "CLAUDE_CODE_PATH", command: "claude", args: ["--version"] },
   { provider: "codex-cli", pathKey: "codexPath", envKey: "CODEX_CLI_PATH", command: "codex", args: ["--version"] },
   { provider: "gemini", pathKey: "geminiPath", envKey: "GEMINI_CLI_PATH", command: "gemini", args: ["--version"] },
-  { provider: "opencode", pathKey: "opencodePath", envKey: "OPENCODE_CLI_PATH", command: "opencode", args: ["--version"] }
+  { provider: "opencode", pathKey: "opencodePath", envKey: "OPENCODE_CLI_PATH", command: "opencode", args: ["--version"] },
+  { provider: "myflicker", pathKey: "myflickerPath", envKey: "MYFLICKER_CLI_PATH", command: "m", args: ["--version"] }
 ];
 
 const languageServerSpecs: Array<{ language: string; envKey?: string; command: string; args: string[] }> = [

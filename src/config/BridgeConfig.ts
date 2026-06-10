@@ -9,6 +9,7 @@ export interface BridgeConfig {
   codexPath?: string;
   geminiPath?: string;
   opencodePath?: string;
+  myflickerPath?: string;
   commands?: Record<string, Partial<CommandDefinition>>;
   categories?: Record<string, Partial<CategoryDefinition>>;
   profiles?: Record<string, Partial<AgentProfile>>;
@@ -19,6 +20,10 @@ export interface BridgeConfig {
   };
   concurrency?: {
     maxRunning?: number;
+  };
+  workflow?: {
+    maxRunning?: number;
+    maxImplementationTasks?: number;
   };
 }
 
@@ -55,6 +60,7 @@ function normalizeConfig(value: unknown): BridgeConfig {
     codexPath: typeof value.codexPath === "string" ? value.codexPath : undefined,
     geminiPath: typeof value.geminiPath === "string" ? value.geminiPath : undefined,
     opencodePath: typeof value.opencodePath === "string" ? value.opencodePath : undefined,
+    myflickerPath: typeof value.myflickerPath === "string" ? value.myflickerPath : undefined,
     commands: normalizeRecord(value.commands),
     categories: normalizeRecord(value.categories),
     profiles: normalizeRecord(value.profiles),
@@ -62,7 +68,8 @@ function normalizeConfig(value: unknown): BridgeConfig {
     defaults: normalizeDefaults(value.defaults),
     concurrency: isRecord(value.concurrency) && typeof value.concurrency.maxRunning === "number"
       ? { maxRunning: value.concurrency.maxRunning }
-      : undefined
+      : undefined,
+    workflow: normalizeWorkflow(value.workflow)
   };
 }
 
@@ -72,6 +79,22 @@ function normalizeDefaults(value: unknown): BridgeConfig["defaults"] {
   if (typeof value.timeoutMs === "number") defaults.timeoutMs = value.timeoutMs;
   if (typeof value.claudeModel === "string") defaults.claudeModel = value.claudeModel;
   return Object.keys(defaults).length > 0 ? defaults : undefined;
+}
+
+function normalizeWorkflow(value: unknown): BridgeConfig["workflow"] {
+  if (!isRecord(value)) return undefined;
+  const workflow: NonNullable<BridgeConfig["workflow"]> = {};
+  if (typeof value.maxRunning === "number" && Number.isFinite(value.maxRunning) && value.maxRunning > 0) {
+    workflow.maxRunning = Math.floor(value.maxRunning);
+  }
+  if (
+    typeof value.maxImplementationTasks === "number"
+    && Number.isFinite(value.maxImplementationTasks)
+    && value.maxImplementationTasks > 0
+  ) {
+    workflow.maxImplementationTasks = Math.floor(value.maxImplementationTasks);
+  }
+  return Object.keys(workflow).length > 0 ? workflow : undefined;
 }
 
 function normalizeRecord(value: unknown): Record<string, Record<string, unknown>> | undefined {

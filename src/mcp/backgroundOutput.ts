@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseClaudeTranscript, type ClaudeTranscriptSummary } from "../agents/ClaudeTranscript.js";
 import type { DelegatedTask, StageResult } from "../types.js";
+import { buildDeliveryReport } from "../workflow/DeliveryReport.js";
 import { parsePlanChecklist, type PlanSummary } from "../workflow/PlanParser.js";
 import { TaskStore } from "../workflow/TaskStore.js";
 
@@ -18,6 +19,7 @@ export interface BackgroundOutput {
   transcript?: { path: string; tail: string };
   transcriptSummary?: ClaudeTranscriptSummary;
   planSummary?: PlanSummary & { path: string };
+  deliveryReport?: ReturnType<typeof buildDeliveryReport>;
   events: BackgroundOutputEvent[];
   cursor: number;
   nextCursor: number;
@@ -33,6 +35,7 @@ export async function readBackgroundOutput(
   taskLookup?: TaskLookup
 ): Promise<BackgroundOutput> {
   const transcriptPath = latestClaudeResult(task)?.agentTranscriptPath;
+  const relatedTasks = task.kind === "workflow" ? lookupWorkflowTasks(task, taskLookup) : [];
   const artifacts = cursor > 0 ? [] : await readArtifacts(task, maxBytes, taskLookup);
   const transcriptContent = transcriptPath ? await readFileOrEmpty(transcriptPath) : "";
   const transcript = transcriptPath && cursor === 0
@@ -48,7 +51,8 @@ export async function readBackgroundOutput(
     ...(transcriptPath ? [{ source: "transcript" as const, path: transcriptPath }] : [])
   ];
   const { events, nextCursor } = await readIncrementalEvents(eventSources, cursor, maxBytes);
-  return { task, artifacts, transcript, transcriptSummary, planSummary, events, cursor, nextCursor, hasMore: false };
+  const deliveryReport = cursor > 0 ? undefined : buildDeliveryReport(task, relatedTasks);
+  return { task, artifacts, transcript, transcriptSummary, planSummary, deliveryReport, events, cursor, nextCursor, hasMore: false };
 }
 
 async function readArtifacts(
@@ -77,7 +81,7 @@ async function eventArtifactPaths(task: DelegatedTask, taskLookup?: TaskLookup):
   return [...new Set(paths)];
 }
 
-function artifactPaths(task: DelegatedTask): string[] {
+export function artifactPaths(task: DelegatedTask): string[] {
   return [
     ...(task.planPath ? [task.planPath] : []),
     ...task.stages.flatMap(stage => [
@@ -91,6 +95,8 @@ function artifactPaths(task: DelegatedTask): string[] {
       join(task.workspace, ".agent-runs", task.runId, `gemini-${stage}.stderr.log`),
       join(task.workspace, ".agent-runs", task.runId, `opencode-${stage}.stdout.log`),
       join(task.workspace, ".agent-runs", task.runId, `opencode-${stage}.stderr.log`),
+      join(task.workspace, ".agent-runs", task.runId, `myflicker-${stage}.stdout.log`),
+      join(task.workspace, ".agent-runs", task.runId, `myflicker-${stage}.stderr.log`),
       join(task.workspace, ".agent-runs", task.runId, `${stage}.output.md`)
     ])
   ];

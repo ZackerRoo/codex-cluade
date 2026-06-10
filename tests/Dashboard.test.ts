@@ -9,6 +9,7 @@ import { createTaskManager, createTaskTools } from "../src/mcp/tools.js";
 import type { AgentName, DelegatedTask, StageInput, StageResult } from "../src/types.js";
 import type { AgentProvider } from "../src/agents/AgentProvider.js";
 import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
+import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
 import { TaskManager } from "../src/workflow/TaskManager.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
 import { StabilityRunner, StabilityRunStore } from "../src/stability/StabilityRunner.js";
@@ -25,6 +26,23 @@ describe("dashboard server", () => {
     await writeFile(join(runDir, "implement.input.md"), "prompt sent to claude", "utf8");
     await writeFile(join(runDir, "implement.output.md"), "implemented dashboard output", "utf8");
     await writeFile(join(runDir, "claude-implement.log"), "claude debug log", "utf8");
+    await new ProjectMemoryStore(workspace).recordTask({
+      ...createTask(workspace),
+      id: "dashboard-memory-task",
+      runId: "dashboard-memory-run",
+      request: "Remember dashboard API",
+      resultSummary: {
+        kind: "task",
+        status: "completed",
+        stages: ["implement"],
+        summary: "Use the dashboard memory panel to inspect learned project context.",
+        changedFiles: ["src/dashboard/server.ts"],
+        agentSessions: [],
+        durationMs: 1000,
+        nextSteps: [],
+        providerAttempts: ["claude"]
+      }
+    });
 
     const store = new TaskStore({ rootDir: root });
     store.save(createTask(workspace));
@@ -61,11 +79,14 @@ describe("dashboard server", () => {
     assert.match(html, /providers/);
     assert.match(html, /Auto Dispatch/);
     assert.match(html, /workflow-agent/);
+    assert.match(html, /MyFlicker/);
     assert.match(html, /workflow-model/);
     assert.match(html, /Requested model/);
     assert.match(html, /workflow-verify-command/);
     assert.match(html, /workflow-max-repair-attempts/);
     assert.match(html, /stability-panel/);
+    assert.match(html, /show-child-tasks/);
+    assert.match(html, /Show child tasks/);
   });
 
   it("serves Live I/O dashboard code", async () => {
@@ -73,6 +94,13 @@ describe("dashboard server", () => {
     const js = await response.text();
 
     assert.equal(response.status, 200);
+    assert.match(js, /Result summary/);
+    assert.match(js, /renderResultSummaryPanel/);
+    assert.match(js, /renderRuntimePanel/);
+    assert.match(js, /renderTaskRuntimeLine/);
+    assert.match(js, /Output bytes/);
+    assert.match(js, /Rollback task/);
+    assert.match(js, /renderDiffPanel/);
     assert.match(js, /Live I\/O/);
     assert.match(js, /\/api\/commands/);
     assert.match(js, /\/api\/providers/);
@@ -88,13 +116,61 @@ describe("dashboard server", () => {
     assert.match(js, /defaultStages/);
     assert.match(js, /Final report/);
     assert.match(js, /Workflow map/);
+    assert.match(js, /Requirement progress/);
+    assert.match(js, /Plan units/);
+    assert.match(js, /Technical details/);
+    assert.match(js, /renderRequirementProgressPanel/);
+    assert.match(js, /renderPlanUnitsPanel/);
+    assert.match(js, /buildExecutionUnits/);
     assert.match(js, /Review findings/);
     assert.match(js, /Changed files/);
     assert.match(js, /renderOutcomePanel/);
+    assert.match(js, /deliveryReport/);
     assert.match(js, /renderWorkflowMap/);
     assert.match(js, /renderVerificationPanel/);
+    assert.match(js, /Guardrails/);
+    assert.match(js, /renderGuardrailsPanel/);
+    assert.match(js, /Quality assessment/);
+    assert.match(js, /renderQualityPanel/);
+    assert.match(js, /loadTaskPreview/);
+    assert.match(js, /renderTaskPreview/);
+    assert.match(js, /Apply recommended setup/);
+    assert.match(js, /applyRecommendedSetup/);
+    assert.match(js, /\/api\/task-preview/);
     assert.match(js, /verifyCommand/);
     assert.match(js, /\/api\/stability-runs/);
+    assert.match(js, /showChildren/);
+    assert.match(js, /visibleTasks/);
+    assert.match(js, /Project memory/);
+    assert.match(js, /renderProjectMemoryPanel/);
+    assert.match(js, /\/api\/project-memory/);
+  });
+
+  it("serves dashboard code that preserves task detail scroll during auto-refresh", async () => {
+    const response = await fetch(`${baseUrl}/dashboard.js`);
+    const js = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.match(js, /captureDetailViewState/);
+    assert.match(js, /restoreDetailViewState/);
+    assert.match(js, /scrollTop/);
+    assert.match(js, /openDetails/);
+  });
+
+  it("serves non-overlapping workflow step layout assets", async () => {
+    const [cssResponse, jsResponse] = await Promise.all([
+      fetch(`${baseUrl}/dashboard.css`),
+      fetch(`${baseUrl}/dashboard.js`)
+    ]);
+    const css = await cssResponse.text();
+    const js = await jsResponse.text();
+
+    assert.equal(cssResponse.status, 200);
+    assert.equal(jsResponse.status, 200);
+    assert.match(css, /\.workflow-steps/);
+    assert.match(css, /grid-template-columns:\s*88px minmax\(120px, 260px\) minmax\(0, 1fr\)/);
+    assert.match(js, /workflow-step-status/);
+    assert.match(js, /workflow-step-body/);
   });
 
   it("lists persisted tasks", async () => {
@@ -107,16 +183,96 @@ describe("dashboard server", () => {
     assert.equal(data.tasks?.[0]?.id, "dashboard-task");
   });
 
-  it("returns task detail with background output", async () => {
-    const response = await fetch(`${baseUrl}/api/tasks/dashboard-task`);
-    const data = await response.json() as { ok?: boolean; output?: { artifacts?: Array<{ content?: string }> } };
+  it("returns project memory for a workspace", async () => {
+    const taskResponse = await fetch(`${baseUrl}/api/tasks/dashboard-task`);
+    const taskData = await taskResponse.json() as { task?: { workspace?: string } };
+    const response = await fetch(`${baseUrl}/api/project-memory?workspace=${encodeURIComponent(taskData.task?.workspace ?? "")}`);
+    const data = await response.json() as {
+      ok?: boolean;
+      markdown?: string;
+      entries?: Array<{ taskId?: string; summary?: string }>;
+    };
 
     assert.equal(response.status, 200);
     assert.equal(data.ok, true);
+    assert.match(data.markdown ?? "", /# Project memory/);
+    assert.equal(data.entries?.[0]?.taskId, "dashboard-memory-task");
+    assert.match(data.entries?.[0]?.summary ?? "", /memory panel/);
+  });
+
+  it("returns task detail with background output", async () => {
+    const response = await fetch(`${baseUrl}/api/tasks/dashboard-task`);
+    const data = await response.json() as {
+      ok?: boolean;
+      task?: {
+        resultSummary?: { status?: string; changedFiles?: string[]; nextSteps?: string[] };
+        rollback?: { status?: string };
+      };
+      output?: { artifacts?: Array<{ content?: string }>; deliveryReport?: { markdown?: string; statusLabel?: string } };
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(data.ok, true);
+    assert.equal(data.task?.resultSummary?.status, "completed");
+    assert.deepEqual(data.task?.resultSummary?.changedFiles, ["index.html"]);
+    assert.ok(data.task?.resultSummary?.nextSteps?.some(step => /changed files/i.test(step)));
+    assert.equal(data.task?.rollback?.status, "ready");
+    assert.equal(data.output?.deliveryReport?.statusLabel, "completed");
+    assert.match(data.output?.deliveryReport?.markdown ?? "", /# Delivery report/);
+    assert.match(data.output?.deliveryReport?.markdown ?? "", /index\.html/);
+    assert.match(data.output?.deliveryReport?.markdown ?? "", /Provider attempts/);
     const artifacts = (data.output?.artifacts ?? []).map(artifact => artifact.content ?? "").join("\n");
     assert.match(artifacts, /prompt sent to claude/);
     assert.match(artifacts, /implemented dashboard output/);
     assert.match(artifacts, /claude debug log/);
+  });
+
+  it("reports live runtime for running tasks with growing output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-runtime-store-"));
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-dashboard-runtime-workspace-"));
+    const runDir = join(workspace, ".agent-runs", "runtime-run");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "myflicker-implement.stdout.log"), "stream event one\nstream event two\n", "utf8");
+
+    const store = new TaskStore({ rootDir: root });
+    store.save({
+      id: "runtime-task",
+      mode: "background",
+      status: "running",
+      workspace,
+      request: "Long running task",
+      stages: ["implement"],
+      preferredAgent: "myflicker",
+      runId: "runtime-run",
+      createdAt: new Date(Date.now() - 90_000).toISOString(),
+      updatedAt: new Date(Date.now() - 90_000).toISOString()
+    });
+    const runtimeServer = createDashboardServer({ taskStore: store });
+    const runtimeBaseUrl = await listenTestServer(runtimeServer);
+    try {
+      const listResponse = await fetch(`${runtimeBaseUrl}/api/tasks`);
+      const list = await listResponse.json() as { tasks?: Array<{ id?: string; runtime?: { outputBytes?: number; durationMs?: number }; durationMs?: number }> };
+      const listed = list.tasks?.find(task => task.id === "runtime-task");
+      assert.ok(listed?.runtime?.outputBytes && listed.runtime.outputBytes > 0);
+      assert.ok((listed?.runtime?.durationMs ?? 0) >= 80_000);
+      assert.ok((listed?.durationMs ?? 0) >= 80_000);
+
+      const detailResponse = await fetch(`${runtimeBaseUrl}/api/tasks/runtime-task`);
+      const detail = await detailResponse.json() as {
+        ok?: boolean;
+        task?: {
+          runtime?: { outputBytes?: number; outputFiles?: Array<{ path?: string }> };
+          resultSummary?: { durationMs?: number; summary?: string };
+        };
+      };
+      assert.equal(detail.ok, true);
+      assert.ok((detail.task?.runtime?.outputBytes ?? 0) > 0);
+      assert.ok(detail.task?.runtime?.outputFiles?.some(file => file.path?.endsWith("myflicker-implement.stdout.log")));
+      assert.ok((detail.task?.resultSummary?.durationMs ?? 0) >= 80_000);
+      assert.match(detail.task?.resultSummary?.summary ?? "", /Task is running/);
+    } finally {
+      await new Promise<void>(resolve => runtimeServer.close(() => resolve()));
+    }
   });
 
   it("returns related child tasks for workflow details", async () => {
@@ -455,11 +611,23 @@ function createTask(workspace: string): DelegatedTask {
           stage: "implement",
           agent: "claude",
           status: "completed",
-          changedFiles: [],
+          changedFiles: ["index.html"],
           requiresCodex: false,
           summary: "done"
         }
       ]
+    },
+    gitCheckpoint: {
+      supported: true,
+      clean: true,
+      head: "abc123",
+      createdAt: "2026-05-19T10:00:00.000Z"
+    },
+    gitDiff: {
+      supported: true,
+      files: [{ path: "index.html", status: "modified" }],
+      patch: "diff --git a/index.html b/index.html\n+hello",
+      generatedAt: "2026-05-19T10:00:01.000Z"
     }
   };
 }

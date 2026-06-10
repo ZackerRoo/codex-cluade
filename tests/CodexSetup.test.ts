@@ -13,7 +13,8 @@ describe("Codex setup", () => {
       claudePath: "/bin/claude",
       codexPath: "/bin/codex",
       geminiPath: "/bin/gemini",
-      opencodePath: "/bin/opencode"
+      opencodePath: "/bin/opencode",
+      myflickerPath: "/bin/m"
     });
 
     assert.match(snippet, /\[mcp_servers\.claude-agent-bridge\]/);
@@ -21,6 +22,7 @@ describe("Codex setup", () => {
     assert.match(snippet, /args = \["\/repo\/dist\/src\/mcpDashboardServer\.js", "--port", "8787"\]/);
     assert.match(snippet, /CLAUDE_CODE_PATH = "\/bin\/claude"/);
     assert.match(snippet, /OPENCODE_CLI_PATH = "\/bin\/opencode"/);
+    assert.match(snippet, /MYFLICKER_CLI_PATH = "\/bin\/m"/);
   });
 
   it("dry-runs without writing the Codex config file", async () => {

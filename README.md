@@ -17,6 +17,14 @@ claude-agent-bridge setup-codex
 claude-agent-bridge setup-codex --write
 ```
 
+Then run the install doctor:
+
+```bash
+claude-agent-bridge doctor
+```
+
+`doctor` checks the Codex config, confirms the `claude-agent-bridge` MCP block is installed, parses the Dashboard port, checks provider CLIs, and reports next steps if anything is missing.
+
 You can also point at explicit provider executables when Codex Desktop cannot inherit your shell `PATH`:
 
 ```bash
@@ -24,7 +32,8 @@ claude-agent-bridge setup-codex --write \
   --claude-path /Users/me/.local/bin/claude \
   --codex-path /opt/homebrew/bin/codex \
   --gemini-path /opt/homebrew/bin/gemini \
-  --opencode-path /opt/homebrew/bin/opencode
+  --opencode-path /opt/homebrew/bin/opencode \
+  --myflicker-path /Users/me/.nvm/versions/node/v22.22.3/bin/m
 ```
 
 For a local checkout or git install, build first and then run the same setup command:
@@ -33,6 +42,7 @@ For a local checkout or git install, build first and then run the same setup com
 npm install
 npm run build
 node dist/src/cli.js setup-codex --write
+npm run doctor
 ```
 
 The setup command installs this MCP block by default:
@@ -48,9 +58,79 @@ CLAUDE_CODE_PATH = "claude"
 CODEX_CLI_PATH = "codex"
 GEMINI_CLI_PATH = "gemini"
 OPENCODE_CLI_PATH = "opencode"
+MYFLICKER_CLI_PATH = "m"
 ```
 
 This unified runtime starts MCP over stdio and a Dashboard on `http://127.0.0.1:8787` in the same process. Dashboard status and MCP tools see the same running tasks, so Dashboard can inspect, cancel, retry, and resume live work.
+
+## Install Doctor
+
+Use `doctor` any time the Dashboard does not open, Codex cannot see the MCP tools, or a provider shows as missing:
+
+```bash
+claude-agent-bridge doctor
+```
+
+For a local checkout:
+
+```bash
+npm run doctor
+```
+
+The command prints JSON with:
+
+- `codexConfig.exists`: whether the target Codex config file exists
+- `codexConfig.bridgeConfigured`: whether `[mcp_servers.claude-agent-bridge]` is present
+- `codexConfig.dashboardConfigured`: whether Codex is using the unified MCP + Dashboard runtime
+- `codexConfig.dashboardPort`: parsed Dashboard port when available
+- `providers.checks`: Claude, Codex CLI, Gemini, OpenCode, and MyFlicker availability
+- `languageServers`: optional LSP availability for richer code intelligence
+- `nextSteps`: concrete actions such as running `setup-codex --write` or configuring provider CLI paths
+
+Useful options:
+
+```bash
+claude-agent-bridge doctor --config ~/.codex/config.toml
+claude-agent-bridge doctor --bridge-config ./codex-claude.config.json
+claude-agent-bridge doctor --timeout-ms 10000
+```
+
+## Release Check
+
+Before publishing or handing the project to another machine, run:
+
+```bash
+npm run release:check
+```
+
+This command runs:
+
+- TypeScript type checking
+- the full test suite
+- `npm pack --dry-run --json`
+- package content validation
+- bin entrypoint validation for:
+  - `claude-agent-bridge`
+  - `claude-agent-bridge-mcp`
+  - `claude-agent-bridge-dashboard`
+  - `claude-agent-bridge-mcp-dashboard`
+
+The release check fails if the package is missing `README.md`, `package.json`, `dist/src/**`, any configured bin file, or a Node shebang on a bin entrypoint.
+
+For a closer real-user install check, run:
+
+```bash
+npm run install:smoke
+```
+
+This command builds the project, runs `npm pack` to create a real `.tgz`, installs that tarball into a temporary project, then exercises the installed bin entrypoints:
+
+- `claude-agent-bridge setup-codex`
+- `claude-agent-bridge doctor`
+- `claude-agent-bridge-dashboard`
+- `claude-agent-bridge-mcp-dashboard`
+
+The Dashboard entrypoints are invoked with an invalid port so they exit quickly after proving that the installed bin links and JavaScript entrypoints load correctly.
 
 Manual registration still works if you prefer using Codex CLI directly:
 
@@ -134,7 +214,7 @@ Claude stage results also include traceability fields when the Claude session ca
 - `mode`: `sync` or `background` (default: `background`)
 - `strategy`: `auto`, `direct`, or `plan`
 - `planId`: optional plan id when the strategy resolves to `plan`
-- `preferredAgent`: optional explicit provider override, such as `claude`, `codex-cli`, `gemini`, `opencode`, or `codex`
+- `preferredAgent`: optional explicit provider override, such as `claude`, `codex-cli`, `gemini`, `opencode`, `myflicker`, or `codex`
 - `runId`, `agentSessionId`, `loadSkills`, `model`, `effort`, `timeoutMs`: optional execution controls
 
 With `strategy: auto`, the bridge uses simple, explainable heuristics. Straight implementation requests route directly to the `coder` profile. Requests that explicitly ask to plan first, or include signals such as complex, refactor, architecture, or multi-step work, create a saved plan and then launch execution from that plan.
@@ -149,7 +229,7 @@ With `strategy: auto`, the bridge uses simple, explainable heuristics. Straight 
 - `category`: routing category, such as `planning`, `coding`, `review`, `analysis`, `fast`, or `heavy`
 - `profile`: named routing profile, such as `planner`, `coder`, `reviewer`, `analyst`, `quick`, or `heavy-coder`
 - `autoCategory`: infer category and default stage from the request when no routing override is provided
-- `preferredAgent`: explicit agent override, `claude`, `codex-cli`, `gemini`, `opencode`, or `codex`
+- `preferredAgent`: explicit agent override, `claude`, `codex-cli`, `gemini`, `opencode`, `myflicker`, or `codex`
 - `agentSessionId`: optional Claude Code session id to resume when a Claude stage runs
 - `loadSkills`: configured skill names to inject into the delegated prompt
 - `runId`, `model`, `effort`, `timeoutMs`: optional execution controls
@@ -162,6 +242,8 @@ Background tasks return a `taskId`. Use:
 - `task_cancel`: cancel a background task
 - `task_retry`: start a fresh background retry from a previous task
 - `task_resume`: start a background retry that resumes the latest Claude session from a previous task
+- `task_rollback`: rollback git changes from a task when its checkpoint started from a clean working tree
+- `project_memory`: read the workspace project memory injected into future agent prompts
 - `agent_catalog`: list available agents, categories, and profiles
 - `provider_doctor`: check local provider CLI availability and versions
 - `command_catalog`: list slash-style command templates
@@ -206,6 +288,14 @@ The LSP tools also accept `lspCommand`, `lspArgs`, and `lspTimeoutMs` for explic
 `provider_doctor` also reports language server health. The Dashboard shows a compact `Language servers` summary under `Provider health`, with a collapsible list for Python, Java, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, and Ruby. Missing language servers do not block `code_symbols`, but definition, references, and diagnostics for that language need the corresponding server installed.
 
 Task metadata is persisted under `~/.codex-claude/tasks/<taskId>.json`, so `task_status`, `task_list`, and `background_output` can inspect completed tasks after the MCP server restarts. Persisted task metadata includes requested execution controls such as `model`, `effort`, `timeoutMs`, and injected `skills`; `task_retry` and `task_resume` preserve those controls when launching the follow-up task. If a saved task was `pending` or `running` when the server restarted, it is reported as `interrupted`; use its `resumeCommand` or `agentSessionId` to continue the Claude session.
+
+Completed, failed, cancelled, and interrupted tasks also update a workspace-level memory under `<workspace>/.codex-claude/memory/project-memory.json` and `<workspace>/.codex-claude/memory/project-memory.md`. This memory records recent requests, result summaries, changed files, provider attempts, verification status, and repair task ids. Future delegated stages receive this markdown through the automatic workspace context block, and `project_memory` or the Dashboard task detail panel can read it directly. For git workspaces, `.codex-claude/memory/` is added to `.git/info/exclude` and ignored by task rollback/diff checks so memory does not pollute user git status.
+
+Terminal task completion also runs lightweight guardrails. `empty_output` is an error: if every stage reports success but there is no summary, no changed file, and no output artifact, the task is marked `failed` instead of pretending it completed. `unfinished_todo` launches one automatic continuation task by default; the source task stays `running` until that continuation finishes, then it is promoted to the continuation result. `comment_density` is a warning for source files dominated by comments. `task_status`, `background_output`, and the Dashboard result summary show guardrails and continuation task ids.
+
+Every result summary also includes a lightweight quality assessment: `success`, `partial`, `risky`, or `failed`, with a score, reasons, and a failure category when applicable. The classifier combines task status, verification status, guardrails, workflow child status, and common error text such as `ENOENT`, permission errors, timeouts, and empty output. `task_status`, `background_output`, final delivery reports, and the Dashboard show this assessment so users can quickly tell whether a task is trustworthy, needs review, or needs retry/repair.
+
+For git workspaces, background tasks capture a conservative checkpoint when they start and a git diff when they finish. If the checkpoint started from a clean working tree, `task_rollback` and the Dashboard `Rollback task` button can restore tracked changes and remove task-created untracked files. If the checkpoint started dirty, rollback is reported as unavailable so user edits are not mixed with agent edits.
 
 Workflow parent tasks also persist a long-running state file under `<workspace>/.codex-claude/workflows/<workflowId>.json`. The state tracks phase (`executing`, `reviewing`, `completed`, or failure states), step-to-task mapping, next action, child task statuses, and compact learnings from completed agents. `background_output` exposes this as `workflow-state.md`, and the Dashboard renders it in the task detail panel.
 
@@ -285,6 +375,7 @@ npm run mcp-dashboard -- --port 8787
 
 In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboard can:
 
+- preview execution before launch, including strategy, expected agents, write/verification behavior, workspace/provider/git warnings, a recommended action, and an `Apply recommended setup` button that updates the form without launching work
 - submit natural-language work through Auto Dispatch
 - run slash-style command templates
 - create a normal delegated task
@@ -293,9 +384,12 @@ In this mode the Dashboard and MCP tools share one `TaskManager`, so the Dashboa
 - set requested `model`, `effort`, `timeoutMs`, and configured skills for new work
 - show requested model controls next to actual Claude transcript models
 - show profile and category defaults from `agent_catalog`
-- show provider health for Claude, Codex CLI, Gemini, and OpenCode
+- show provider health for Claude, Codex CLI, Gemini, OpenCode, and MyFlicker
 - launch stability runs that execute the same task across Claude, Codex CLI, Gemini, or other configured providers for multiple iterations
 - persist stability run summaries under `~/.codex-claude/stability/*.json`, including success rate, failed counts, average duration, failure samples, and per-task status
+- show a task result summary with final status, provider, duration, changed files, verification result, agent sessions, and next steps
+- show recent project memory for the selected task workspace
+- show git checkpoint, diff, rollback status, and a rollback action for eligible tasks
 - inspect task input, parsed result, raw Claude CLI stream, stderr, debug log, and transcript tail in the Live I/O panel
 - cancel currently `pending` or `running` tasks
 - retry `failed`, `interrupted`, or `cancelled` tasks
@@ -307,7 +401,7 @@ For a real long-running comparison, open Advanced mode and use Stability runs:
 
 ```text
 Workspace root: /tmp/codex-claude-stability
-Providers: claude,codex-cli,gemini
+Providers: claude,codex-cli,gemini,myflicker
 Iterations: 3
 Request: Create a small HTML game and include a short README describing how to run it.
 Verify command: optional shell command, for example npm test
@@ -345,11 +439,16 @@ Example:
   "codexPath": "/Applications/Codex.app/Contents/Resources/codex",
   "geminiPath": "/opt/homebrew/bin/gemini",
   "opencodePath": "/opt/homebrew/bin/opencode",
+  "myflickerPath": "/Users/me/.nvm/versions/node/v22.22.3/bin/m",
   "defaults": {
     "timeoutMs": 900000
   },
   "concurrency": {
     "maxRunning": 2
+  },
+  "workflow": {
+    "maxRunning": 3,
+    "maxImplementationTasks": 6
   },
   "skills": {
     "html-game": {
@@ -381,7 +480,7 @@ Example:
         "allowedTools": ["Bash(npm test *)", "Read"],
         "disallowedTools": ["NotebookEdit"]
       },
-      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "codex" }]
+      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "myflicker" }, { "agent": "codex" }]
     }
   },
   "categories": {
@@ -394,7 +493,7 @@ Example:
         "allowedTools": ["Bash(git diff *)"],
         "disallowedTools": ["Write", "Edit"]
       },
-      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "codex" }]
+      "fallbacks": [{ "agent": "codex-cli" }, { "agent": "gemini" }, { "agent": "myflicker" }, { "agent": "codex" }]
     }
   }
 }
@@ -402,7 +501,7 @@ Example:
 
 Permission policy precedence follows routing: `profile.permission` overrides `category.permission`; if neither is set, stage defaults apply.
 
-`concurrency.maxRunning` limits how many background tasks run at once; additional background tasks remain `pending` until a running task completes, fails, or is cancelled. `skills` entries can be injected with `delegate_task.loadSkills`, either inline with `content` or from a markdown/text file via `path`.
+`concurrency.maxRunning` limits how many background tasks run at once; additional background tasks remain `pending` until a running task completes, fails, or is cancelled. `/ultrawork` also has workflow-specific safety limits: `workflow.maxRunning` caps concurrent implementation children for the same workflow (default `3`), and `workflow.maxImplementationTasks` folds long plan checklists into a smaller number of implementation batches (default `6`) so one large request does not spawn dozens of agents editing the same workspace at once. `skills` entries can be injected with `delegate_task.loadSkills`, either inline with `content` or from a markdown/text file via `path`.
 
 ## Stage Routing
 
@@ -426,7 +525,8 @@ Named profiles:
 - `coder`: Claude implement stage
 - `codex-coder`: Codex CLI implement stage
 - `gemini-coder`: Gemini CLI implement stage
-- `multi-coder`: Claude implement stage with Codex CLI, Gemini, then Codex handoff fallback
+- `myflicker-coder`: MyFlicker CLI implement stage
+- `multi-coder`: Claude implement stage with Codex CLI, Gemini, MyFlicker, then Codex handoff fallback
 - `reviewer`: Codex review stage
 - `analyst`: Codex analyze stage
 - `quick`: low-effort Codex handoff
@@ -434,7 +534,7 @@ Named profiles:
 
 Routing precedence is: `preferredAgent` > `profile` > `category` > explicit per-stage routing > stage defaults. If no `stage`, `stages`, `category`, `profile`, or `preferredAgent` is provided, `delegate_task` infers a category from the request and chooses the default stage for that category.
 
-`coding`, `heavy`, `coder`, `multi-coder`, and `heavy-coder` include a runtime fallback chain: try Claude first, then Codex CLI, then Gemini CLI, then Codex handoff with `requiresCodex: true` if local provider CLIs fail. Explicit `preferredAgent` disables fallback because the caller has chosen a concrete agent.
+`coding`, `heavy`, `coder`, `multi-coder`, and `heavy-coder` include a runtime fallback chain: try Claude first, then Codex CLI, then Gemini CLI, then MyFlicker, then Codex handoff with `requiresCodex: true` if local provider CLIs fail. Explicit `preferredAgent` disables fallback because the caller has chosen a concrete agent.
 
 ## Agents
 
@@ -442,9 +542,10 @@ Routing precedence is: `preferredAgent` > `profile` > `category` > explicit per-
 - `codex-cli`: invokes the local Codex CLI with `codex exec --json`
 - `gemini`: invokes the local Gemini CLI with `gemini --prompt --output-format stream-json`
 - `opencode`: optional OpenCode CLI provider when installed/configured
+- `myflicker`: invokes the local MyFlicker `m` CLI with `m -q --cwd <workspace> --output-format stream-json`; implement stages use `--approval-mode yolo`, while read-only stages disable write tools
 - `codex`: returns `requiresCodex: true` so the current Codex Desktop session handles the stage
 
-Provider executable paths can be configured with `claudePath`, `codexPath`, `geminiPath`, and `opencodePath` in `codex-claude.config.json`, or with `CLAUDE_CODE_PATH`, `CODEX_CLI_PATH`, `GEMINI_CLI_PATH`, and `OPENCODE_CLI_PATH`.
+Provider executable paths can be configured with `claudePath`, `codexPath`, `geminiPath`, `opencodePath`, and `myflickerPath` in `codex-claude.config.json`, or with `CLAUDE_CODE_PATH`, `CODEX_CLI_PATH`, `GEMINI_CLI_PATH`, `OPENCODE_CLI_PATH`, and `MYFLICKER_CLI_PATH`.
 
 ## Safety
 

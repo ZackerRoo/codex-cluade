@@ -75,6 +75,12 @@ const agents: Record<AgentName, AgentDefinition> = {
     description: "Optional OpenCode CLI provider when installed and configured.",
     defaultStages: ["plan", "implement", "review", "analyze"],
     categories: ["coding", "heavy", "planning", "analysis"]
+  },
+  myflicker: {
+    name: "myflicker",
+    description: "Local MyFlicker `m` CLI provider for headless delegated coding, planning, and analysis.",
+    defaultStages: ["plan", "implement", "review", "analyze"],
+    categories: ["coding", "heavy", "planning", "analysis"]
   }
 };
 
@@ -88,7 +94,7 @@ const categories: Record<string, CategoryDefinition> = {
     name: "coding",
     description: "Implementation work that may edit files and run commands.",
     agent: "claude",
-    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "myflicker" }, { agent: "codex" }]
   },
   review: {
     name: "review",
@@ -110,7 +116,7 @@ const categories: Record<string, CategoryDefinition> = {
     description: "Heavier delegated work for Claude Code.",
     agent: "claude",
     effort: "high",
-    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "myflicker", effort: "high" }, { agent: "codex" }]
   }
 };
 
@@ -129,7 +135,7 @@ const profiles: Record<string, AgentProfile> = {
     category: "coding",
     agent: "claude",
     stages: ["implement"],
-    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "myflicker" }, { agent: "codex" }]
   },
   "codex-coder": {
     name: "codex-coder",
@@ -145,13 +151,20 @@ const profiles: Record<string, AgentProfile> = {
     agent: "gemini",
     stages: ["implement"]
   },
+  "myflicker-coder": {
+    name: "myflicker-coder",
+    description: "Implementation work handled by local MyFlicker CLI.",
+    category: "coding",
+    agent: "myflicker",
+    stages: ["implement"]
+  },
   "multi-coder": {
     name: "multi-coder",
-    description: "Implementation with provider fallback: Claude, Codex CLI, Gemini, then Codex handoff.",
+    description: "Implementation with provider fallback: Claude, Codex CLI, Gemini, MyFlicker, then Codex handoff.",
     category: "coding",
     agent: "claude",
     stages: ["implement"],
-    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli" }, { agent: "gemini" }, { agent: "myflicker" }, { agent: "codex" }]
   },
   explore: {
     name: "explore",
@@ -177,7 +190,7 @@ const profiles: Record<string, AgentProfile> = {
     agent: "claude",
     stages: ["implement"],
     effort: "high",
-    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }],
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "myflicker", effort: "high" }, { agent: "codex" }],
     rolePrompt: "You are Sisyphus. Execute the implementation task completely. Keep changes scoped, update only necessary files, run relevant verification, and report changed files and test results. Do not commit."
   },
   momus: {
@@ -187,7 +200,7 @@ const profiles: Record<string, AgentProfile> = {
     agent: "claude",
     stages: ["review"],
     permission: { mode: "default", disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"] },
-    fallbacks: [{ agent: "codex-cli", effort: "medium" }, { agent: "gemini" }, { agent: "codex" }],
+    fallbacks: [{ agent: "codex-cli", effort: "medium" }, { agent: "gemini" }, { agent: "myflicker", effort: "medium" }, { agent: "codex" }],
     rolePrompt: "You are Momus. Be a strict reviewer. Prioritize correctness bugs, regressions, missing tests, unclear assumptions, and incomplete verification. Return findings first with concrete file or plan references."
   },
   frontend: {
@@ -197,7 +210,7 @@ const profiles: Record<string, AgentProfile> = {
     agent: "claude",
     stages: ["implement"],
     effort: "high",
-    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }],
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "myflicker", effort: "high" }, { agent: "codex" }],
     rolePrompt: "You are Frontend. Build the actual usable interface first, keep layout responsive, avoid text overlap, and verify in a browser when applicable. Keep changes scoped and do not commit."
   },
   reviewer: {
@@ -230,7 +243,7 @@ const profiles: Record<string, AgentProfile> = {
     stages: ["implement"],
     effort: "high",
     timeoutMs: 900_000,
-    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "codex" }]
+    fallbacks: [{ agent: "codex-cli", effort: "high" }, { agent: "gemini" }, { agent: "myflicker", effort: "high" }, { agent: "codex" }]
   }
 };
 

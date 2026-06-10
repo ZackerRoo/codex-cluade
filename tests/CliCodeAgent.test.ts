@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { CodexCliAgent, GeminiCliAgent, OpenCodeAgent } from "../src/agents/CliCodeAgent.js";
+import { CodexCliAgent, GeminiCliAgent, MyFlickerAgent, OpenCodeAgent } from "../src/agents/CliCodeAgent.js";
 
 describe("CLI code agents", () => {
   it("runs Codex CLI non-interactively with workspace, model, and prompt on stdin", async () => {
@@ -132,5 +132,87 @@ describe("CLI code agents", () => {
     assert.match(calls[0].args.at(-1) ?? "", /Stage: implement/);
     assert.equal(calls[0].input, "");
     assert.equal(await readFile(result.outputPath ?? "", "utf8"), "OpenCode finished");
+  });
+
+  it("runs MyFlicker headlessly with stream output, cwd, model, effort, and resume support", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-myflicker-cli-"));
+    const calls: Array<{ command: string; args: string[]; input?: string }> = [];
+    const agent = new MyFlickerAgent({
+      myflickerPath: "m",
+      exec: async (command, args, options) => {
+        calls.push({ command, args, input: options.input });
+        return {
+          code: 0,
+          stdout: [
+            JSON.stringify({ session_id: "myflicker-session-1" }),
+            JSON.stringify({ text: "MyFlicker finished" })
+          ].join("\n"),
+          stderr: "",
+          timedOut: false
+        };
+      },
+      getChangedFiles: async () => ["src/app.ts"]
+    });
+
+    const result = await agent.run({
+      stage: "implement",
+      agent: "myflicker",
+      workspace,
+      request: "Create an app",
+      runId: "2026-06-02-myflicker",
+      agentSessionId: "previous-session",
+      model: "myflicker-test-model",
+      effort: "high"
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.agent, "myflicker");
+    assert.equal(result.agentSessionId, "myflicker-session-1");
+    assert.equal(result.resumeCommand, "'m' --resume 'myflicker-session-1'");
+    assert.equal(calls[0].command, "m");
+    assert.deepEqual(calls[0].args.slice(0, 5), ["-q", "--cwd", workspace, "--output-format", "stream-json"]);
+    assert.ok(calls[0].args.includes("--approval-mode"));
+    assert.ok(calls[0].args.includes("yolo"));
+    assert.ok(calls[0].args.includes("--resume"));
+    assert.ok(calls[0].args.includes("previous-session"));
+    assert.ok(calls[0].args.includes("--model"));
+    assert.ok(calls[0].args.includes("myflicker-test-model"));
+    assert.ok(calls[0].args.includes("--thinking-level"));
+    assert.ok(calls[0].args.includes("high"));
+    assert.match(calls[0].args.at(-1) ?? "", /Stage: implement/);
+    assert.equal(calls[0].input, "");
+    assert.equal(await readFile(result.outputPath ?? "", "utf8"), "MyFlicker finished");
+  });
+
+  it("runs MyFlicker read-only stages with write tools disabled", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-myflicker-plan-"));
+    const calls: Array<{ args: string[] }> = [];
+    const agent = new MyFlickerAgent({
+      exec: async (_command, args) => {
+        calls.push({ args });
+        return { code: 0, stdout: "Plan done", stderr: "", timedOut: false };
+      },
+      getChangedFiles: async () => []
+    });
+
+    await agent.run({
+      stage: "plan",
+      agent: "myflicker",
+      workspace,
+      request: "Plan the change",
+      runId: "2026-06-02-myflicker-plan"
+    });
+
+    const toolsIndex = calls[0].args.indexOf("--tools");
+    assert.ok(toolsIndex >= 0);
+    assert.deepEqual(JSON.parse(calls[0].args[toolsIndex + 1]), {
+      write: false,
+      edit: false,
+      bash: false,
+      docs_write: false,
+      docs_edit: false,
+      todoWrite: false
+    });
+    assert.ok(!calls[0].args.includes("--approval-mode"));
   });
 });

@@ -4,4 +4,7 @@ export * from "./commands/CommandRegistry.js";
 export * from "./config/CodexSetup.js";
 export * from "./workflow/AgentCoordinator.js";
 export * from "./workflow/AgentRouter.js";
+export * from "./workflow/DeliveryReport.js";
+export * from "./workflow/ProjectMemory.js";
+export * from "./workflow/TaskGuardrails.js";
 export * from "./workflow/WorkflowStateStore.js";

@@ -1,11 +1,18 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentName, AgentProfileName, DelegatedTask, InjectedSkill, Stage, TaskCategory, TaskMode, TaskStatus, VerificationResult } from "../types.js";
 import type { CoordinatorResult } from "./AgentCoordinator.js";
 import { AgentCoordinator, type CoordinatorInput } from "./AgentCoordinator.js";
 import { isLiveStatus, TaskStore } from "./TaskStore.js";
+import { buildTaskResultSummary } from "./TaskResultSummary.js";
+import { ProjectMemoryStore } from "./ProjectMemory.js";
+import { evaluateTaskGuardrails } from "./TaskGuardrails.js";
 import { WorkflowStateStore } from "./WorkflowStateStore.js";
 import { execShellCapture, type ExecResult } from "../utils/exec.js";
+import { createGitCheckpoint, createGitDiff, rollbackGitTaskChanges } from "../utils/git.js";
 
-type VerificationExec = (command: string, options: { cwd: string; timeoutMs: number; signal?: AbortSignal }) => Promise<ExecResult>;
+type VerificationExec = (command: string, options: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<ExecResult>;
 
 export interface DelegateTaskInput {
   mode: TaskMode;
@@ -26,6 +33,9 @@ export interface DelegateTaskInput {
   retryOf?: string;
   resumeOf?: string;
   repairOf?: string;
+  continuationOf?: string;
+  maxContinuationAttempts?: number;
+  continuationAttempt?: number;
   verifyCommand?: string;
   maxRepairAttempts?: number;
   repairAttempt?: number;
@@ -56,6 +66,9 @@ export interface WorkflowTaskInput {
 
 export interface TaskManagerOptions {
   concurrency?: {
+    maxRunning?: number;
+  };
+  workflow?: {
     maxRunning?: number;
   };
   verification?: {
@@ -109,17 +122,17 @@ export class TaskManager {
 
   get(taskId: string): DelegatedTask | undefined {
     const task = this.tasks.get(taskId);
-    if (task) return this.withWorkflowStatus(withDerivedTaskMetadata(publicTask(task)));
+    if (task) return this.withWorkflowStatus(this.reconcileRepairPromotion(this.reconcileContinuationPromotion(withDerivedTaskMetadata(publicTask(task)))));
     const stored = this.store.get(taskId);
     if (!stored) return undefined;
-    return this.interruptIfOrphaned(this.withWorkflowStatus(withDerivedTaskMetadata(stored)));
+    return this.interruptIfOrphaned(this.withWorkflowStatus(this.reconcileRepairPromotion(this.reconcileContinuationPromotion(withDerivedTaskMetadata(stored)))));
   }
 
   list(): DelegatedTask[] {
-    const memoryTasks = new Map([...this.tasks.values()].map(task => [task.id, this.withWorkflowStatus(withDerivedTaskMetadata(publicTask(task)))]));
+    const memoryTasks = new Map([...this.tasks.values()].map(task => [task.id, this.withWorkflowStatus(this.reconcileRepairPromotion(this.reconcileContinuationPromotion(withDerivedTaskMetadata(publicTask(task)))))]));
     const storedTasks = this.store.list().map(task => {
       const memoryTask = memoryTasks.get(task.id);
-      return memoryTask ?? this.interruptIfOrphaned(withDerivedTaskMetadata(task));
+      return memoryTask ?? this.interruptIfOrphaned(this.reconcileRepairPromotion(this.reconcileContinuationPromotion(withDerivedTaskMetadata(task))));
     });
     for (const task of memoryTasks.values()) {
       if (!storedTasks.some(stored => stored.id === task.id)) storedTasks.push(task);
@@ -187,6 +200,7 @@ export class TaskManager {
     task.status = "cancelled";
     task.updatedAt = new Date().toISOString();
     task.error = "Task cancelled";
+    task.resultSummary = buildTaskResultSummary(publicTask(task));
     this.saveTask(task);
     this.processQueue();
     return publicTask(task);
@@ -309,6 +323,31 @@ export class TaskManager {
     });
   }
 
+  async rollback(taskId: string): Promise<DelegatedTask | undefined> {
+    const task = this.get(taskId);
+    if (!task || task.kind === "workflow") return undefined;
+    if (!task.gitCheckpoint?.supported) {
+      return this.saveRollbackResult(task, "failed", "Task has no git checkpoint.");
+    }
+    if (!task.gitCheckpoint.clean) {
+      return this.saveRollbackResult(task, "failed", "Task checkpoint started dirty; refusing automatic rollback.");
+    }
+    const rollback = await rollbackGitTaskChanges(task.workspace, task.gitDiff);
+    if (!rollback.ok) return this.saveRollbackResult(task, "failed", rollback.error ?? "Rollback failed.");
+    const updated: DelegatedTask = {
+      ...task,
+      gitDiff: await createGitDiff(task.workspace),
+      rollback: {
+        status: "completed",
+        completedAt: new Date().toISOString()
+      },
+      updatedAt: new Date().toISOString()
+    };
+    updated.resultSummary = buildTaskResultSummary(updated);
+    this.saveDelegatedTask(updated);
+    return updated;
+  }
+
   private createTask(input: DelegateTaskInput): StoredTask {
     const now = new Date().toISOString();
     const id = input.runId ?? createTaskId();
@@ -334,6 +373,9 @@ export class TaskManager {
       retryOf: input.retryOf,
       resumeOf: input.resumeOf,
       repairOf: input.repairOf,
+      continuationOf: input.continuationOf,
+      maxContinuationAttempts: input.maxContinuationAttempts,
+      continuationAttempt: input.continuationAttempt,
       verifyCommand: input.verifyCommand,
       maxRepairAttempts: input.maxRepairAttempts,
       repairAttempt: input.repairAttempt,
@@ -347,6 +389,8 @@ export class TaskManager {
   private async startBackgroundTask(task: StoredTask, input: DelegateTaskInput): Promise<void> {
     task.status = "running";
     task.updatedAt = new Date().toISOString();
+    task.gitCheckpoint = await createGitCheckpoint(task.workspace);
+    task.rollback = rollbackStateFor(task);
     this.saveTask(task);
     try {
       const result = await this.coordinator.run({
@@ -367,26 +411,52 @@ export class TaskManager {
         signal: task.controller.signal
       });
       if (isCancelled(task)) return;
-      task.status = result.ok ? "completed" : "failed";
+      const finalStatus: TaskStatus = result.ok ? "completed" : "failed";
       task.result = result;
       task.agentSessionId = latestClaudeSessionId({ ...task, result }) ?? task.agentSessionId;
       task.error = result.ok ? undefined : latestStageError({ ...task, result }) ?? result.summary;
       task.updatedAt = new Date().toISOString();
-      if (result.ok && task.verifyCommand) {
+      await this.refreshGitDiff(task);
+      task.status = finalStatus;
+      task.guardrails = await evaluateTaskGuardrails(publicTask(task));
+      const guardrailError = task.guardrails.find(issue => issue.severity === "error");
+      if (guardrailError && task.status === "completed") {
+        task.status = "failed";
+        task.error = `Guardrail failed: ${guardrailError.kind}. ${guardrailError.message}`;
+      }
+      task.resultSummary = buildTaskResultSummary(publicTask(task));
+      if (result.ok && task.status === "completed") {
+        const continuation = await this.maybeLaunchContinuation(publicTask(task), input);
+        if (continuation.taskId) {
+          const issue = task.guardrails.find(item => item.kind === "unfinished_todo");
+          if (issue) issue.continuationTaskId = continuation.taskId;
+          task.status = "running";
+          task.continuationTaskId = continuation.taskId;
+          task.resultSummary = buildTaskResultSummary(publicTask(task));
+          this.saveTask(task);
+          this.processQueue();
+          return;
+        }
+      }
+      if (result.ok && task.status === "completed" && task.verifyCommand) {
         task.status = "running";
         task.verification = startVerification(task.verifyCommand);
+        task.resultSummary = buildTaskResultSummary(publicTask(task));
         this.saveTask(task);
         await this.finishVerification(task, input);
         this.processQueue();
         return;
       }
       this.saveTask(task);
+      this.promoteContinuedSource(publicTask(task));
       this.processQueue();
     } catch (error) {
       if (isCancelled(task)) return;
-      task.status = "failed";
       task.error = error instanceof Error ? error.message : String(error);
       task.updatedAt = new Date().toISOString();
+      await this.refreshGitDiff(task);
+      task.status = "failed";
+      task.resultSummary = buildTaskResultSummary(publicTask(task));
       this.saveTask(task);
       this.processQueue();
     }
@@ -394,14 +464,34 @@ export class TaskManager {
 
   private processQueue(): void {
     const maxRunning = this.options.concurrency?.maxRunning ?? Number.POSITIVE_INFINITY;
-    let running = [...this.tasks.values()].filter(task => task.status === "running").length;
+    let running = [...this.tasks.values()].filter(isBlockingRunningTask).length;
     for (const task of this.tasks.values()) {
       if (running >= maxRunning) return;
       if (task.status !== "pending" || !task.input) continue;
       if (!this.dependenciesReady(task)) continue;
+      const workflowMaxRunning = this.workflowMaxRunning(task);
+      if (workflowMaxRunning !== undefined && this.runningWorkflowChildren(task) >= workflowMaxRunning) continue;
       running += 1;
       void this.startBackgroundTask(task, task.input);
     }
+  }
+
+  private workflowMaxRunning(task: StoredTask): number | undefined {
+    if (!task.parentTaskId) return undefined;
+    if (!task.stages.includes("implement")) return undefined;
+    if (task.stages.includes("review")) return undefined;
+    return this.options.workflow?.maxRunning ?? 3;
+  }
+
+  private runningWorkflowChildren(task: StoredTask): number {
+    if (!task.parentTaskId) return 0;
+    return [...this.tasks.values()].filter(candidate =>
+      candidate.id !== task.id
+      && candidate.parentTaskId === task.parentTaskId
+      && isBlockingRunningTask(candidate)
+      && candidate.stages.includes("implement")
+      && !candidate.stages.includes("review")
+    ).length;
   }
 
   private interruptIfOrphaned(task: DelegatedTask): DelegatedTask {
@@ -413,12 +503,16 @@ export class TaskManager {
       updatedAt: new Date().toISOString(),
       error: task.error ?? "Task interrupted because the MCP server process restarted."
     };
+    interrupted.resultSummary = buildTaskResultSummary(interrupted);
     this.store.save(interrupted);
+    this.scheduleProjectMemory(interrupted);
     return interrupted;
   }
 
   private saveTask(task: StoredTask): void {
-    this.store.save(publicTask(task));
+    const publicFields = publicTask(task);
+    this.store.save(publicFields);
+    this.scheduleProjectMemory(publicFields);
   }
 
   private saveDelegatedTask(task: DelegatedTask): void {
@@ -429,6 +523,14 @@ export class TaskManager {
       return;
     }
     this.store.save(task);
+    this.scheduleProjectMemory(task);
+  }
+
+  private scheduleProjectMemory(task: DelegatedTask): void {
+    if (!isTerminalStatus(task.status)) return;
+    void new ProjectMemoryStore(task.workspace).recordTask(task).catch(() => {
+      // Project memory should improve future context, not fail task persistence.
+    });
   }
 
   private dependenciesReady(task: StoredTask): boolean {
@@ -462,7 +564,8 @@ export class TaskManager {
       : summary.completed === summary.total
         ? "completed"
         : "running";
-    const workflowState = new WorkflowStateStore(task.workspace).updateFromTasks(task.id, children, {
+    const childrenWithSummaries = children.map(child => withDerivedTaskMetadata(child));
+    const workflowState = new WorkflowStateStore(task.workspace).updateFromTasks(task.id, childrenWithSummaries, {
         request: task.request,
         planId: task.planId,
         planPath: task.planPath,
@@ -481,6 +584,10 @@ export class TaskManager {
         state: workflowState
       },
       updatedAt: status === task.status ? task.updatedAt : new Date().toISOString()
+    };
+    updated = {
+      ...updated,
+      resultSummary: buildTaskResultSummary(updated, childrenWithSummaries)
     };
     if (updated.status === "completed" && updated.verifyCommand && !updated.verification) {
       updated = {
@@ -530,11 +637,17 @@ export class TaskManager {
     const command = task.verifyCommand;
     if (!command) return;
     const startedAt = task.verification?.startedAt ?? new Date().toISOString();
+    const tmpDir = await mkdtemp(join(tmpdir(), `codex-claude-verify-${task.id}-`));
     let result: ExecResult;
     try {
       result = await (this.options.verification?.exec ?? execShellCapture)(command, {
         cwd: task.workspace,
-        timeoutMs: this.options.verification?.timeoutMs ?? 5 * 60 * 1000
+        timeoutMs: this.options.verification?.timeoutMs ?? 5 * 60 * 1000,
+        env: {
+          CODEX_CLAUDE_VERIFY_TMP: tmpDir,
+          CODEX_CLAUDE_VERIFY_RUN_ID: task.id,
+          CODEX_CLAUDE_VERIFY_WORKSPACE: task.workspace
+        }
       });
     } catch (error) {
       result = {
@@ -549,6 +662,7 @@ export class TaskManager {
       command,
       status: passed ? "passed" : "failed",
       startedAt,
+      tmpDir,
       finishedAt: new Date().toISOString(),
       exitCode: result.code,
       timedOut: result.timedOut,
@@ -572,7 +686,126 @@ export class TaskManager {
       }
     }
 
+    nextTask.gitDiff = await createGitDiff(nextTask.workspace);
+    nextTask.rollback = rollbackStateFor(nextTask);
+    nextTask.guardrails = await evaluateTaskGuardrails(nextTask);
+    const guardrailError = nextTask.guardrails.find(issue => issue.severity === "error");
+    if (guardrailError && nextTask.status === "completed") {
+      nextTask.status = "failed";
+      nextTask.error = `Guardrail failed: ${guardrailError.kind}. ${guardrailError.message}`;
+    }
+    if (passed && nextTask.status === "completed") {
+      const continuation = await this.maybeLaunchContinuation(nextTask, input);
+      if (continuation.taskId) {
+        const issue = nextTask.guardrails.find(item => item.kind === "unfinished_todo");
+        if (issue) issue.continuationTaskId = continuation.taskId;
+        nextTask.status = "running";
+        nextTask.continuationTaskId = continuation.taskId;
+      }
+    }
+    nextTask.resultSummary = buildTaskResultSummary(nextTask);
     this.saveDelegatedTask(nextTask);
+    if (passed && nextTask.status === "completed") this.promoteRepairedSource(nextTask);
+    if (isTerminalStatus(nextTask.status)) this.promoteContinuedSource(nextTask);
+  }
+
+  private promoteRepairedSource(repairTask: DelegatedTask): void {
+    if (!repairTask.repairOf || repairTask.verification?.status !== "passed") return;
+    const source = this.rawTask(repairTask.repairOf);
+    if (!source || !source.verification) return;
+    const promoted = this.promotedSourceFromRepair(source, repairTask);
+    if (promoted) this.saveDelegatedTask(promoted);
+  }
+
+  private reconcileRepairPromotion(task: DelegatedTask): DelegatedTask {
+    if (task.status !== "failed" || task.verification?.status !== "failed" || !task.verification.repairTaskId) return task;
+    const repairTask = this.rawTask(task.verification.repairTaskId);
+    const promoted = repairTask ? this.promotedSourceFromRepair(task, repairTask) : undefined;
+    if (!promoted) return task;
+    this.saveDelegatedTask(promoted);
+    return promoted;
+  }
+
+  private promoteContinuedSource(continuationTask: DelegatedTask): void {
+    const source = continuationTask.continuationOf ? this.rawTask(continuationTask.continuationOf) : undefined;
+    const promoted = source ? this.promotedSourceFromContinuation(source, continuationTask) : undefined;
+    if (promoted) this.saveDelegatedTask(promoted);
+  }
+
+  private reconcileContinuationPromotion(task: DelegatedTask): DelegatedTask {
+    if (!task.continuationTaskId || task.status !== "running") return task;
+    const continuationTask = this.rawTask(task.continuationTaskId);
+    const promoted = continuationTask ? this.promotedSourceFromContinuation(task, continuationTask) : undefined;
+    if (!promoted) return task;
+    this.saveDelegatedTask(promoted);
+    return promoted;
+  }
+
+  private promotedSourceFromContinuation(source: DelegatedTask, continuationTask: DelegatedTask): DelegatedTask | undefined {
+    if (source.status !== "running") return undefined;
+    if (source.continuationTaskId !== continuationTask.id) return undefined;
+    if (continuationTask.status === "running" || continuationTask.status === "pending") return undefined;
+
+    const promoted: DelegatedTask = {
+      ...source,
+      status: continuationTask.status === "completed" ? "completed" : continuationTask.status,
+      result: continuationTask.result ?? source.result,
+      agentSessionId: continuationTask.agentSessionId ?? source.agentSessionId,
+      verification: continuationTask.verification ?? source.verification,
+      guardrails: continuationTask.guardrails ?? [],
+      gitDiff: continuationTask.gitDiff ?? source.gitDiff,
+      rollback: rollbackStateFor({ ...source, gitDiff: continuationTask.gitDiff ?? source.gitDiff }),
+      error: continuationTask.status === "completed" ? undefined : `Continuation task ${continuationTask.id} ended with ${continuationTask.status}: ${continuationTask.error ?? "no details"}`,
+      updatedAt: new Date().toISOString()
+    };
+    promoted.resultSummary = buildTaskResultSummary(promoted);
+    return promoted;
+  }
+
+  private promotedSourceFromRepair(source: DelegatedTask, repairTask: DelegatedTask): DelegatedTask | undefined {
+    if (!source.verification) return undefined;
+    if (repairTask.verification?.status !== "passed") return undefined;
+    const verification: VerificationResult = {
+      ...source.verification,
+      status: "passed",
+      finishedAt: repairTask.verification.finishedAt,
+      exitCode: repairTask.verification.exitCode,
+      timedOut: repairTask.verification.timedOut,
+      stdout: repairTask.verification.stdout,
+      stderr: repairTask.verification.stderr,
+      tmpDir: repairTask.verification.tmpDir,
+      error: undefined,
+      repairTaskId: repairTask.id
+    };
+    const promoted: DelegatedTask = {
+      ...source,
+      status: "completed",
+      verification,
+      error: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    promoted.resultSummary = buildTaskResultSummary(promoted);
+    return promoted;
+  }
+
+  private async refreshGitDiff(task: StoredTask): Promise<void> {
+    task.gitDiff = await createGitDiff(task.workspace);
+    task.rollback = rollbackStateFor(task);
+  }
+
+  private saveRollbackResult(task: DelegatedTask, status: "completed" | "failed", error?: string): DelegatedTask {
+    const updated: DelegatedTask = {
+      ...task,
+      rollback: {
+        status,
+        completedAt: status === "completed" ? new Date().toISOString() : undefined,
+        error
+      },
+      updatedAt: new Date().toISOString()
+    };
+    updated.resultSummary = buildTaskResultSummary(updated);
+    this.saveDelegatedTask(updated);
+    return updated;
   }
 
   private async maybeLaunchRepair(task: DelegatedTask, input?: DelegateTaskInput): Promise<{ taskId?: string }> {
@@ -604,6 +837,41 @@ export class TaskManager {
     });
     return { taskId: repair.taskId };
   }
+
+  private async maybeLaunchContinuation(task: DelegatedTask, input?: DelegateTaskInput): Promise<{ taskId?: string }> {
+    const issue = task.guardrails?.find(item => item.kind === "unfinished_todo");
+    if (!issue) return {};
+    const maxContinuationAttempts = task.maxContinuationAttempts ?? 1;
+    const continuationAttempt = task.continuationAttempt ?? 0;
+    if (continuationAttempt >= maxContinuationAttempts) return {};
+    const nextAttempt = continuationAttempt + 1;
+    const continuation = await this.run({
+      mode: "background",
+      workspace: task.workspace,
+      request: buildContinuationRequest(task, issue),
+      stages: input?.stages && input.stages.length > 0 ? input.stages : task.stages,
+      routing: input?.routing ?? {},
+      category: input?.category ?? task.category,
+      profile: input?.profile ?? task.profile,
+      preferredAgent: input?.preferredAgent ?? task.preferredAgent,
+      agentSessionId: input?.agentSessionId ?? task.agentSessionId,
+      planId: task.planId,
+      planPath: task.planPath,
+      parentTaskId: task.parentTaskId,
+      model: input?.model ?? task.model,
+      effort: input?.effort ?? task.effort,
+      timeoutMs: input?.timeoutMs ?? task.timeoutMs,
+      skills: input?.skills ?? task.skills,
+      verifyCommand: task.verifyCommand,
+      maxRepairAttempts: task.maxRepairAttempts,
+      repairAttempt: task.repairAttempt,
+      maxContinuationAttempts,
+      continuationAttempt: nextAttempt,
+      continuationOf: task.id,
+      runId: `${task.id}-continuation-${nextAttempt}`
+    });
+    return { taskId: continuation.taskId };
+  }
 }
 
 function createTaskId(): string {
@@ -614,6 +882,14 @@ function createTaskId(): string {
 
 function isCancelled(task: StoredTask): boolean {
   return task.status === "cancelled";
+}
+
+function isTerminalStatus(status: TaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted";
+}
+
+function isBlockingRunningTask(task: DelegatedTask): boolean {
+  return task.status === "running" && !task.continuationTaskId;
 }
 
 function publicTask(task: StoredTask): DelegatedTask {
@@ -627,6 +903,13 @@ function startVerification(command: string): VerificationResult {
     status: "running",
     startedAt: new Date().toISOString()
   };
+}
+
+function rollbackStateFor(task: DelegatedTask): DelegatedTask["rollback"] {
+  if (!task.gitCheckpoint?.supported) return { status: "not_available", error: task.gitCheckpoint?.error ?? "Git checkpoint is not available." };
+  if (!task.gitCheckpoint.clean) return { status: "not_available", error: "Git checkpoint started dirty." };
+  if (!task.gitDiff || task.gitDiff.files.length === 0) return { status: "not_available", error: "No task diff is available." };
+  return { status: "ready" };
 }
 
 function workflowStatus(task: DelegatedTask, childStatus: TaskStatus): TaskStatus {
@@ -660,19 +943,45 @@ function buildRepairRequest(task: DelegatedTask): string {
     verification?.exitCode !== undefined ? `Exit code: ${verification.exitCode}` : "",
     verification?.stderr ? `stderr:\n${verification.stderr}` : "",
     verification?.stdout ? `stdout:\n${verification.stdout}` : "",
+    "Verification runs receive CODEX_CLAUDE_VERIFY_TMP, CODEX_CLAUDE_VERIFY_RUN_ID, and CODEX_CLAUDE_VERIFY_WORKSPACE. Prefer those variables over fixed /tmp paths so repeated verification is idempotent.",
     "",
     "Keep changes scoped. Do not commit. Run the verification command before finishing."
+  ].filter(Boolean).join("\n");
+}
+
+function buildContinuationRequest(task: DelegatedTask, issue: { evidence?: string }): string {
+  return [
+    "Continue the task because guardrails found unfinished TODO items in the previous agent output.",
+    "",
+    `Original task: ${task.id}`,
+    `Original request: ${task.request}`,
+    task.planPath ? `Plan path: ${task.planPath}` : "",
+    issue.evidence ? `Unfinished TODO: ${issue.evidence}` : "",
+    "",
+    "Finish only the remaining TODO work. Keep changes scoped. Do not commit.",
+    task.verifyCommand ? `Run or preserve this verification command before finishing: ${task.verifyCommand}` : ""
   ].filter(Boolean).join("\n");
 }
 
 function withDerivedTaskMetadata(task: DelegatedTask): DelegatedTask {
   const agentSessionId = task.agentSessionId ?? latestClaudeSessionId(task);
   const error = task.status === "failed" ? latestStageError(task) ?? task.error : task.error;
-  if (agentSessionId === task.agentSessionId && error === task.error) return task;
-  return {
+  const derived = {
     ...task,
     agentSessionId,
     error
+  };
+  const resultSummary = buildTaskResultSummary(derived);
+  if (
+    agentSessionId === task.agentSessionId &&
+    error === task.error &&
+    JSON.stringify(resultSummary) === JSON.stringify(task.resultSummary)
+  ) {
+    return task;
+  }
+  return {
+    ...derived,
+    resultSummary
   };
 }
 

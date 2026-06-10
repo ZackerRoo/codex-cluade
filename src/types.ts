@@ -1,5 +1,5 @@
 export type Stage = "plan" | "implement" | "review" | "analyze";
-export type AgentName = "claude" | "codex" | "codex-cli" | "gemini" | "opencode";
+export type AgentName = "claude" | "codex" | "codex-cli" | "gemini" | "opencode" | "myflicker";
 export type StageStatus = "completed" | "failed" | "requires_codex" | "skipped";
 export type TaskMode = "sync" | "background";
 export type TaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -60,6 +60,7 @@ export interface VerificationResult {
   command: string;
   status: "running" | "passed" | "failed";
   startedAt: string;
+  tmpDir?: string;
   finishedAt?: string;
   exitCode?: number | null;
   timedOut?: boolean;
@@ -106,6 +107,170 @@ export interface WorkflowState {
   updatedAt: string;
 }
 
+export interface GuardrailIssue {
+  kind: "empty_output" | "unfinished_todo" | "comment_density";
+  severity: "warning" | "error";
+  message: string;
+  evidence?: string;
+  file?: string;
+  continuationTaskId?: string;
+}
+
+export interface TaskResultSummary {
+  kind: TaskKind;
+  status: TaskStatus;
+  summary: string;
+  quality?: {
+    status: "success" | "partial" | "risky" | "failed";
+    score: number;
+    reasons: string[];
+  };
+  failure?: {
+    category: "verification_failed" | "timeout" | "permission" | "environment" | "empty_output" | "provider_failed" | "cancelled" | "interrupted" | "unknown";
+    message: string;
+    nextAction: string;
+  };
+  provider?: AgentName;
+  providerAttempts?: AgentName[];
+  stages: Stage[];
+  changedFiles: string[];
+  agentSessions: Array<{
+    agent: AgentName;
+    sessionId: string;
+    resumeCommand?: string;
+  }>;
+  verification?: {
+    command: string;
+    status: VerificationResult["status"];
+    exitCode?: number | null;
+    error?: string;
+    tmpDir?: string;
+    repairedBy?: string;
+  };
+  durationMs: number;
+  nextSteps: string[];
+  guardrails?: GuardrailIssue[];
+  error?: string;
+  childSummary?: {
+    total: number;
+    completed: number;
+    failed: number;
+    running: number;
+    pending: number;
+  };
+}
+
+export interface TaskPreviewWarning {
+  code: "workspace_missing" | "dirty_workspace" | "not_git" | "provider_unavailable" | "no_verification" | "large_request" | "sync_long_task";
+  severity: "info" | "warning" | "error";
+  message: string;
+}
+
+export interface TaskExecutionPreviewStep {
+  role: string;
+  stage: Stage | "workflow";
+  provider?: AgentName;
+  profile?: AgentProfileName;
+  count?: number;
+}
+
+export interface TaskPreview {
+  strategy: "direct" | "plan" | "ultrawork" | "create_plan" | "execute_plan";
+  risk: {
+    level: "low" | "medium" | "high";
+    score: number;
+  };
+  executionPlan: TaskExecutionPreviewStep[];
+  willModifyFiles: boolean;
+  verification: {
+    configured: boolean;
+    command?: string;
+  };
+  warnings: TaskPreviewWarning[];
+  recommendedAction: string;
+  recommendedSetup?: {
+    tab?: "command" | "auto" | "delegate" | "create-plan" | "execute-plan";
+    command?: string;
+    mode?: TaskMode;
+    strategy?: "auto" | "direct" | "plan";
+    preferredAgent?: AgentName | "";
+    stage?: Stage;
+    profile?: AgentProfileName;
+    requiresConfirmation?: boolean;
+    notes: string[];
+  };
+}
+
+export interface DeliveryReport {
+  title: string;
+  statusLabel: string;
+  summary: string;
+  markdown: string;
+  sections: Array<{
+    title: string;
+    items: string[];
+  }>;
+}
+
+export interface ProjectMemoryEntry {
+  taskId: string;
+  runId: string;
+  status: TaskStatus;
+  request: string;
+  summary: string;
+  changedFiles: string[];
+  providerAttempts: AgentName[];
+  verificationStatus?: VerificationResult["status"];
+  repairTaskId?: string;
+  updatedAt: string;
+}
+
+export interface ProjectMemory {
+  workspace: string;
+  updatedAt: string;
+  entries: ProjectMemoryEntry[];
+}
+
+export interface TaskGitCheckpoint {
+  supported: boolean;
+  clean: boolean;
+  head?: string;
+  status?: string[];
+  createdAt: string;
+  error?: string;
+}
+
+export interface TaskGitDiffFile {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "unknown";
+}
+
+export interface TaskGitDiff {
+  supported: boolean;
+  files: TaskGitDiffFile[];
+  patch?: string;
+  generatedAt: string;
+  error?: string;
+}
+
+export interface TaskRollbackState {
+  status: "not_available" | "ready" | "completed" | "failed";
+  completedAt?: string;
+  error?: string;
+}
+
+export interface TaskRuntimeSnapshot {
+  durationMs: number;
+  outputBytes: number;
+  outputFiles: Array<{
+    path: string;
+    bytes: number;
+    modifiedAt?: string;
+  }>;
+  lastOutputAt?: string;
+  liveChangedFiles: string[];
+}
+
 export interface DelegatedTask {
   id: string;
   kind?: TaskKind;
@@ -139,6 +304,10 @@ export interface DelegatedTask {
   retryOf?: string;
   resumeOf?: string;
   repairOf?: string;
+  continuationOf?: string;
+  continuationTaskId?: string;
+  maxContinuationAttempts?: number;
+  continuationAttempt?: number;
   verifyCommand?: string;
   verification?: VerificationResult;
   maxRepairAttempts?: number;
@@ -150,6 +319,12 @@ export interface DelegatedTask {
   runId: string;
   createdAt: string;
   updatedAt: string;
+  resultSummary?: TaskResultSummary;
+  runtime?: TaskRuntimeSnapshot;
+  gitCheckpoint?: TaskGitCheckpoint;
+  gitDiff?: TaskGitDiff;
+  rollback?: TaskRollbackState;
+  guardrails?: GuardrailIssue[];
   result?: unknown;
   error?: string;
 }

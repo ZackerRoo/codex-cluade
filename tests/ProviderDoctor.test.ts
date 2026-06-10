@@ -10,7 +10,8 @@ describe("ProviderDoctor", () => {
         claudePath: "/tmp/claude",
         codexPath: "/tmp/codex",
         geminiPath: "/tmp/gemini",
-        opencodePath: "/tmp/opencode"
+        opencodePath: "/tmp/opencode",
+        myflickerPath: "/tmp/m"
       },
       exec: async (command, args) => {
         calls.push({ command, args });
@@ -26,8 +27,8 @@ describe("ProviderDoctor", () => {
     const result = await doctor.check();
 
     assert.equal(result.ok, true);
-    assert.deepEqual(calls.slice(0, 4).map(call => call.command), ["/tmp/claude", "/tmp/codex", "/tmp/gemini", "/tmp/opencode"]);
-    assert.ok(calls.slice(0, 4).every(call => call.args.includes("--version")));
+    assert.deepEqual(calls.slice(0, 5).map(call => call.command), ["/tmp/claude", "/tmp/codex", "/tmp/gemini", "/tmp/opencode", "/tmp/m"]);
+    assert.ok(calls.slice(0, 5).every(call => call.args.includes("--version")));
     assert.equal(result.checks[0].status, "ready");
     assert.equal(result.checks[0].version, "/tmp/claude 1.2.3");
   });

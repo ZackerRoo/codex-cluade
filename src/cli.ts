@@ -5,11 +5,14 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { ClaudeCodeAgent } from "./agents/ClaudeCodeAgent.js";
-import { CodexCliAgent, GeminiCliAgent, OpenCodeAgent } from "./agents/CliCodeAgent.js";
+import { CodexCliAgent, GeminiCliAgent, MyFlickerAgent, OpenCodeAgent } from "./agents/CliCodeAgent.js";
 import { CodexAgent } from "./agents/CodexAgent.js";
+import { loadBridgeConfig } from "./config/BridgeConfig.js";
 import { defaultCodexConfigPath, setupCodexMcpConfig } from "./config/CodexSetup.js";
+import { runInstallDoctor } from "./install/InstallDoctor.js";
 import type { AgentName, Stage } from "./types.js";
 import { printJson } from "./utils/json.js";
+import { verifyWebApp, type WebAppExpectation } from "./verification/WebAppVerifier.js";
 import { AgentCoordinator } from "./workflow/AgentCoordinator.js";
 
 async function main(argv: string[]): Promise<void> {
@@ -20,8 +23,18 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === "doctor") {
+    await runDoctor(rest);
+    return;
+  }
+
+  if (command === "verify-web") {
+    await runVerifyWeb(rest);
+    return;
+  }
+
   if (command !== "run-stage") {
-    throw new Error(`Unknown command: ${command ?? ""}. Expected run-stage or setup-codex.`);
+    throw new Error(`Unknown command: ${command ?? ""}. Expected run-stage, setup-codex, doctor, or verify-web.`);
   }
 
   const { values } = parseArgs({
@@ -56,6 +69,7 @@ async function main(argv: string[]): Promise<void> {
       "codex-cli": new CodexCliAgent(),
       gemini: new GeminiCliAgent(),
       opencode: new OpenCodeAgent(),
+      myflicker: new MyFlickerAgent(),
       codex: new CodexAgent()
     }
   });
@@ -75,6 +89,63 @@ async function main(argv: string[]): Promise<void> {
   printJson(result.results[0]);
 }
 
+async function runVerifyWeb(args: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      workspace: { type: "string" },
+      entry: { type: "string" },
+      expect: { type: "string", multiple: true },
+      "min-body-text": { type: "string" }
+    }
+  });
+  const workspace = resolve(required(values.workspace, "--workspace"));
+  const expectations = parseExpectations(values.expect);
+  const minBodyTextLength = values["min-body-text"] ? Number(values["min-body-text"]) : undefined;
+  if (minBodyTextLength !== undefined && (!Number.isFinite(minBodyTextLength) || minBodyTextLength < 0)) {
+    throw new Error("--min-body-text must be a non-negative number");
+  }
+  const result = await verifyWebApp({
+    workspace,
+    entry: values.entry,
+    expectations,
+    minBodyTextLength
+  });
+  printJson({
+    command: "verify-web",
+    ...result
+  });
+  if (!result.ok) process.exitCode = 1;
+}
+
+async function runDoctor(args: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args,
+    options: {
+      config: { type: "string" },
+      "bridge-config": { type: "string" },
+      "timeout-ms": { type: "string" }
+    }
+  });
+  const timeoutMs = values["timeout-ms"] ? Number(values["timeout-ms"]) : undefined;
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new Error("--timeout-ms must be a positive number");
+  }
+  const env = values["bridge-config"]
+    ? { ...process.env, CODEX_CLAUDE_CONFIG: values["bridge-config"] }
+    : process.env;
+  const result = await runInstallDoctor({
+    codexConfigPath: values.config ?? defaultCodexConfigPath(),
+    bridgeConfig: loadBridgeConfig(process.cwd(), env),
+    env,
+    timeoutMs
+  });
+  printJson({
+    command: "doctor",
+    ...result
+  });
+}
+
 async function runSetupCodex(args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
@@ -86,7 +157,8 @@ async function runSetupCodex(args: string[]): Promise<void> {
       "claude-path": { type: "string" },
       "codex-path": { type: "string" },
       "gemini-path": { type: "string" },
-      "opencode-path": { type: "string" }
+      "opencode-path": { type: "string" },
+      "myflicker-path": { type: "string" }
     }
   });
 
@@ -103,7 +175,8 @@ async function runSetupCodex(args: string[]): Promise<void> {
     claudePath: values["claude-path"],
     codexPath: values["codex-path"],
     geminiPath: values["gemini-path"],
-    opencodePath: values["opencode-path"]
+    opencodePath: values["opencode-path"],
+    myflickerPath: values["myflicker-path"]
   });
 
   printJson({
@@ -124,6 +197,20 @@ function required(value: string | boolean | undefined, flag: string): string {
   throw new Error(`Missing required option ${flag}`);
 }
 
+function parseExpectations(value: string[] | string | boolean | undefined): WebAppExpectation[] {
+  const items = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return items.map(item => {
+    const marker = item.lastIndexOf(">=");
+    if (marker <= 0) throw new Error(`Invalid --expect value: ${item}. Expected selector>=count`);
+    const selector = item.slice(0, marker).trim();
+    const minCount = Number(item.slice(marker + 2).trim());
+    if (!selector || !Number.isInteger(minCount) || minCount < 0) {
+      throw new Error(`Invalid --expect value: ${item}. Expected selector>=count`);
+    }
+    return { selector, minCount };
+  });
+}
+
 function parseStage(value: string): Stage {
   if (value === "plan" || value === "implement" || value === "review" || value === "analyze") {
     return value;
@@ -132,7 +219,7 @@ function parseStage(value: string): Stage {
 }
 
 function parseAgent(value: string): AgentName {
-  if (value === "claude" || value === "codex" || value === "codex-cli" || value === "gemini" || value === "opencode") return value;
+  if (value === "claude" || value === "codex" || value === "codex-cli" || value === "gemini" || value === "opencode" || value === "myflicker") return value;
   throw new Error(`Invalid agent: ${value}`);
 }
 

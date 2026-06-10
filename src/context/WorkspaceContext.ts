@@ -41,7 +41,8 @@ const DOC_FILES = [
   "README",
   "AGENTS.md",
   "CLAUDE.md",
-  ".codex-claude/context.md"
+  ".codex-claude/context.md",
+  ".codex-claude/memory/project-memory.md"
 ];
 
 const MANIFEST_FILES = [

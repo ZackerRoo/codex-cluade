@@ -8,7 +8,7 @@ import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "./mcp/too
 
 const stageSchema = z.enum(["plan", "implement", "review", "analyze"]);
 const effortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]).optional();
-const agentSchema = z.enum(["claude", "codex", "codex-cli", "gemini", "opencode"]).optional();
+const agentSchema = z.enum(["claude", "codex", "codex-cli", "gemini", "opencode", "myflicker"]).optional();
 const modeSchema = z.enum(["sync", "background"]).optional();
 const autoDispatchStrategySchema = z.enum(["auto", "direct", "plan"]).optional();
 
@@ -23,7 +23,7 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
     "provider_doctor",
     {
       title: "Provider doctor",
-      description: "Check local provider CLI availability and version for Claude, Codex CLI, Gemini, and OpenCode.",
+      description: "Check local provider CLI availability and version for Claude, Codex CLI, Gemini, OpenCode, and MyFlicker.",
       inputSchema: {},
       annotations: {
         title: "Provider doctor",
@@ -49,6 +49,32 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
       }
     },
     async () => taskTools.commandCatalogTool()
+  );
+
+  server.registerTool(
+    "task_preview",
+    {
+      title: "Task preview",
+      description: "Preview strategy, agents, risk, warnings, and recommended action before launching a task.",
+      inputSchema: {
+        command: z.string().optional().describe("Optional slash command, such as /ultrawork or /start-work."),
+        workspace: z.string().min(1).describe("Absolute workspace path where the task would run."),
+        request: z.string().optional().describe("Natural-language request to preview."),
+        mode: modeSchema.describe("sync or background mode to preview."),
+        strategy: autoDispatchStrategySchema.describe("Optional auto-dispatch strategy."),
+        stage: stageSchema.optional().describe("Optional delegated stage."),
+        profile: z.string().optional().describe("Optional routing profile."),
+        preferredAgent: agentSchema.describe("Optional explicit agent override."),
+        verifyCommand: z.string().optional().describe("Optional verification command.")
+      },
+      annotations: {
+        title: "Task preview",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.taskPreviewTool(args)
   );
 
   server.registerTool(
@@ -275,6 +301,24 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "project_memory",
+    {
+      title: "Project memory",
+      description: "Read the workspace project memory that is injected into future delegated agent prompts.",
+      inputSchema: {
+        workspace: z.string().min(1).describe("Absolute workspace path whose .codex-claude/memory should be read.")
+      },
+      annotations: {
+        title: "Project memory",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.projectMemoryTool(args)
+  );
+
+  server.registerTool(
     "task_list",
     {
       title: "List tasks",
@@ -448,6 +492,24 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
       }
     },
     async args => taskTools.taskResumeTool(args)
+  );
+
+  server.registerTool(
+    "task_rollback",
+    {
+      title: "Rollback task",
+      description: "Rollback git changes made by a completed task when its checkpoint started clean.",
+      inputSchema: {
+        taskId: z.string().min(1).describe("Task id to roll back.")
+      },
+      annotations: {
+        title: "Rollback task",
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.taskRollbackTool(args)
   );
 
   return server;

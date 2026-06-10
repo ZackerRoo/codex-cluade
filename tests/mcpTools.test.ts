@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
+import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
 
 describe("runClaudeStageTool", () => {
@@ -143,6 +144,7 @@ describe("delegate task MCP tools", () => {
     assert.ok(checks?.some(check => check.provider === "codex-cli"));
     assert.ok(checks?.some(check => check.provider === "gemini"));
     assert.ok(checks?.some(check => check.provider === "opencode"));
+    assert.ok(checks?.some(check => check.provider === "myflicker"));
   });
 
   it("lists and runs command templates", async () => {
@@ -281,6 +283,81 @@ describe("delegate task MCP tools", () => {
     assert.match(stateArtifact.content ?? "", /Next action: complete/);
     const plan = await readFile(join(workspace, ".codex-claude", "plans", "ultrawork-plan.md"), "utf8");
     assert.match(plan, /Create index\.html/);
+  });
+
+  it("adds web DOM verification automatically for ultrawork game requests", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-ultrawork-web-verify-test-"));
+    const tools = await createTestTaskTools({
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({
+            result: (options.input ?? "").includes("Create an implementation plan")
+              ? "- [ ] Create index.html\n- [ ] Create app.js"
+              : "implemented web game"
+          }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.runCommandTool({
+      command: "/ultrawork 实现一个末世网页游戏",
+      workspace,
+      planId: "ultrawork-web-plan",
+      runId: "ultrawork-web-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    const task = result.structuredContent?.task as { verifyCommand?: string } | undefined;
+    assert.match(task?.verifyCommand ?? "", /verify-web/);
+    assert.match(task?.verifyCommand ?? "", /#map > \*/);
+    assert.match(task?.verifyCommand ?? "", /#action-grid button/);
+  });
+
+  it("caps long ultrawork plans into implementation batches", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-ultrawork-cap-test-"));
+    const checklist = Array.from({ length: 10 }, (_, index) => `- [ ] Build module ${index + 1}`).join("\n");
+    const tools = await createTestTaskTools({
+      config: { workflow: { maxImplementationTasks: 4 } },
+      claude: {
+        claudePath: "claude",
+        exec: async (_command, _args, options) => ({
+          code: 0,
+          stdout: JSON.stringify({
+            result: (options.input ?? "").includes("Create an implementation plan")
+              ? checklist
+              : "implemented from capped ultrawork plan"
+          }),
+          stderr: "",
+          timedOut: false
+        }),
+        getChangedFiles: async () => []
+      }
+    });
+
+    const result = await tools.runCommandTool({
+      command: "/ultrawork build a larger app",
+      workspace,
+      planId: "ultrawork-cap-plan",
+      runId: "ultrawork-cap-run"
+    });
+
+    assert.equal(result.structuredContent?.ok, true);
+    assert.deepEqual(result.structuredContent?.childTaskIds, [
+      "ultrawork-cap-run-part-1",
+      "ultrawork-cap-run-part-2",
+      "ultrawork-cap-run-part-3",
+      "ultrawork-cap-run-part-4",
+      "ultrawork-cap-run-review"
+    ]);
+    const first = await tools.taskStatusTool({ taskId: "ultrawork-cap-run-part-1" });
+    assert.match(String(first.structuredContent?.request), /Assigned implementation batch 1\/4/);
+    assert.match(String(first.structuredContent?.request), /Build module 1/);
+    assert.match(String(first.structuredContent?.request), /Build module 3/);
   });
 
   it("auto-dispatches simple implementation requests directly to the coder profile", async () => {
@@ -454,6 +531,7 @@ describe("delegate task MCP tools", () => {
 
     const status = await tools.taskStatusTool({ taskId: "delegate-verify-run" });
     assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Verification: passed/);
+    assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Quality: success/);
     assert.equal(status.structuredContent?.verifyCommand, `${process.execPath} -e "process.exit(0)"`);
   });
 
@@ -486,6 +564,8 @@ describe("delegate task MCP tools", () => {
     const output = await tools.backgroundOutputTool({ taskId });
     assert.equal(output.structuredContent?.ok, true);
     assert.match(JSON.stringify(output.structuredContent), /done output/);
+    assert.match(String(output.content[0].type === "text" ? output.content[0].text : ""), /# Delivery report/);
+    assert.match(JSON.stringify(output.structuredContent), /deliveryReport/);
   });
 
   it("reads background output incrementally with a cursor", async () => {
@@ -596,7 +676,9 @@ describe("delegate task MCP tools", () => {
     assert.ok(agents?.some(agent => agent.name === "codex-cli"));
     assert.ok(agents?.some(agent => agent.name === "gemini"));
     assert.ok(agents?.some(agent => agent.name === "opencode"));
+    assert.ok(agents?.some(agent => agent.name === "myflicker"));
     const profiles = catalog.structuredContent?.profiles as Array<{ name?: string; rolePrompt?: string }> | undefined;
+    assert.ok(profiles?.some(profile => profile.name === "myflicker-coder"));
     assert.ok(profiles?.some(profile => profile.name === "prometheus" && /Prometheus/.test(profile.rolePrompt ?? "")));
     assert.ok(profiles?.some(profile => profile.name === "sisyphus" && /Sisyphus/.test(profile.rolePrompt ?? "")));
     assert.ok(profiles?.some(profile => profile.name === "momus" && /Momus/.test(profile.rolePrompt ?? "")));
@@ -827,6 +909,42 @@ describe("delegate task MCP tools", () => {
     assert.equal(structured.planSummary?.totalSteps, 2);
     assert.equal(structured.planSummary?.completedSteps, 1);
     assert.equal(structured.planSummary?.progressPercent, 50);
+  });
+
+  it("reads project memory for a workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-project-memory-tool-test-"));
+    await new ProjectMemoryStore(workspace).recordTask({
+      id: "memory-tool-task",
+      mode: "background",
+      status: "completed",
+      workspace,
+      request: "Remember API conventions",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      runId: "memory-tool-run",
+      createdAt: "2026-06-04T08:00:00.000Z",
+      updatedAt: "2026-06-04T08:01:00.000Z",
+      resultSummary: {
+        kind: "task",
+        status: "completed",
+        stages: ["implement"],
+        summary: "Use repository service helpers for API calls.",
+        changedFiles: ["src/api.ts"],
+        agentSessions: [],
+        durationMs: 1000,
+        nextSteps: [],
+        providerAttempts: ["claude"]
+      }
+    });
+    const tools = await createTestTaskTools();
+
+    const result = await tools.projectMemoryTool({ workspace });
+
+    assert.equal(result.structuredContent?.ok, true);
+    const entries = result.structuredContent?.entries as Array<{ taskId?: string; summary?: string }> | undefined;
+    assert.equal(entries?.[0]?.taskId, "memory-tool-task");
+    assert.match(entries?.[0]?.summary ?? "", /repository service helpers/);
+    assert.match(String(result.content[0].type === "text" ? result.content[0].text : ""), /# Project memory/);
   });
 });
 

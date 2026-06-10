@@ -1,10 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AddressInfo } from "node:net";
-import { readBackgroundOutput } from "../mcp/backgroundOutput.js";
-import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskToolSet } from "../mcp/tools.js";
+import { stat } from "node:fs/promises";
+import { artifactPaths, readBackgroundOutput } from "../mcp/backgroundOutput.js";
+import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet } from "../mcp/tools.js";
 import type { StabilityRunner, StabilityRunInput } from "../stability/StabilityRunner.js";
-import type { DelegatedTask, TaskStatus } from "../types.js";
+import type { DelegatedTask, StageResult, TaskRuntimeSnapshot, TaskStatus } from "../types.js";
+import { changedFiles } from "../utils/git.js";
+import { ProjectMemoryStore, renderProjectMemoryMarkdown } from "../workflow/ProjectMemory.js";
 import type { TaskManager } from "../workflow/TaskManager.js";
+import { buildTaskResultSummary } from "../workflow/TaskResultSummary.js";
 import { TaskStore } from "../workflow/TaskStore.js";
 
 export interface DashboardOptions {
@@ -81,12 +85,29 @@ async function routeRequest(
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/tasks") {
-    const tasks = listTasks(context);
+    const tasks = await listTasks(context);
     sendJson(response, 200, {
       ok: true,
       generatedAt: new Date().toISOString(),
       summary: summarizeTasks(tasks),
       tasks: tasks.map(taskListItem)
+    });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/project-memory") {
+    const workspace = url.searchParams.get("workspace") ?? "";
+    if (!workspace) {
+      sendJson(response, 400, { ok: false, error: "workspace is required" });
+      return;
+    }
+    const store = new ProjectMemoryStore(workspace);
+    const memory = await store.read();
+    sendJson(response, 200, {
+      ok: true,
+      ...memory,
+      jsonPath: store.jsonPath,
+      markdownPath: store.markdownPath,
+      markdown: renderProjectMemoryMarkdown(memory)
     });
     return;
   }
@@ -170,6 +191,15 @@ async function routeRequest(
       return;
     }
     const result = await context.taskTools.commandCatalogTool();
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/task-preview") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.taskPreviewTool(await readJsonBody(request) as unknown as TaskPreviewArgs);
     sendToolResult(response, result);
     return;
   }
@@ -258,35 +288,52 @@ async function routeRequest(
       sendJson(response, 200, { ok: true, taskId: task.id, task });
       return;
     }
+    if (request.method === "POST" && parts[1] === "rollback") {
+      if (!context.taskManager) {
+        sendJson(response, 409, { ok: false, error: "Dashboard is not attached to a live TaskManager." });
+        return;
+      }
+      const task = await context.taskManager.rollback(taskId);
+      if (!task) {
+        sendJson(response, 404, { ok: false, error: `Task not found or cannot be rolled back: ${taskId}` });
+        return;
+      }
+      sendJson(response, task.rollback?.status === "failed" ? 400 : 200, { ok: task.rollback?.status !== "failed", taskId: task.id, task, error: task.rollback?.error });
+      return;
+    }
     if (request.method !== "GET" || parts.length !== 1) {
       sendJson(response, 404, { ok: false, error: "Not found" });
       return;
     }
-    const task = getTask(context, taskId);
+    const task = getRawTask(context, taskId);
     if (!task) {
       sendJson(response, 404, { ok: false, error: `Task not found: ${taskId}` });
       return;
     }
-    const output = await readBackgroundOutput(task, context.maxBytes, Number(url.searchParams.get("cursor") ?? 0), id => getTask(context, id));
-    sendJson(response, 200, { ok: true, task, relatedTasks: relatedTasks(context, task), output });
+    const related = await relatedTasks(context, task);
+    const summarizedTask = await withDashboardRuntime(task, related);
+    const output = await readBackgroundOutput(summarizedTask, context.maxBytes, Number(url.searchParams.get("cursor") ?? 0), id => getRawTask(context, id));
+    sendJson(response, 200, { ok: true, task: summarizedTask, relatedTasks: related, output });
     return;
   }
 
   sendJson(response, 404, { ok: false, error: "Not found" });
 }
 
-function listTasks(context: { taskStore: TaskStore; taskManager?: TaskManager }): DelegatedTask[] {
-  return context.taskManager ? context.taskManager.list() : context.taskStore.list();
+async function listTasks(context: { taskStore: TaskStore; taskManager?: TaskManager }): Promise<DelegatedTask[]> {
+  const tasks = context.taskManager ? context.taskManager.list() : context.taskStore.list();
+  return await Promise.all(tasks.map(task => withDashboardRuntime(task)));
 }
 
-function getTask(context: { taskStore: TaskStore; taskManager?: TaskManager }, taskId: string): DelegatedTask | undefined {
+function getRawTask(context: { taskStore: TaskStore; taskManager?: TaskManager }, taskId: string): DelegatedTask | undefined {
   return context.taskManager ? context.taskManager.get(taskId) : context.taskStore.get(taskId);
 }
 
-function relatedTasks(context: { taskStore: TaskStore; taskManager?: TaskManager }, task: DelegatedTask): DelegatedTask[] {
+async function relatedTasks(context: { taskStore: TaskStore; taskManager?: TaskManager }, task: DelegatedTask): Promise<DelegatedTask[]> {
   const ids = [...(task.childTaskIds ?? [])];
   if (task.reviewTaskId && !ids.includes(task.reviewTaskId)) ids.push(task.reviewTaskId);
-  return ids.map(id => getTask(context, id)).filter((child): child is DelegatedTask => child !== undefined);
+  const tasks = ids.map(id => getRawTask(context, id)).filter((child): child is DelegatedTask => child !== undefined);
+  return await Promise.all(tasks.map(child => withDashboardRuntime(child)));
 }
 
 function summarizeTasks(tasks: DelegatedTask[]): Record<TaskStatus, number> & { total: number; runningCapacity?: number } {
@@ -308,8 +355,121 @@ function taskListItem(task: DelegatedTask): DelegatedTask & { durationMs: number
   const updated = Date.parse(task.updatedAt);
   return {
     ...task,
-    durationMs: Number.isFinite(created) && Number.isFinite(updated) ? Math.max(0, updated - created) : 0
+    durationMs: task.runtime?.durationMs ?? (Number.isFinite(created) && Number.isFinite(updated) ? Math.max(0, updated - created) : 0)
   };
+}
+
+async function withDashboardRuntime(task: DelegatedTask, relatedTasks: DelegatedTask[] = []): Promise<DelegatedTask> {
+  const runtime = await buildRuntimeSnapshot(task, relatedTasks);
+  const resultSummary = task.resultSummary ?? buildTaskResultSummary(task, relatedTasks);
+  const active = isActive(task);
+  return {
+    ...task,
+    runtime,
+    resultSummary: active
+      ? {
+          ...resultSummary,
+          durationMs: runtime.durationMs,
+          changedFiles: unique([...resultSummary.changedFiles, ...runtime.liveChangedFiles]),
+          summary: liveResultSummary(task, runtime, resultSummary.summary)
+        }
+      : resultSummary,
+    rollback: task.rollback ?? rollbackStateFor(task)
+  };
+}
+
+async function buildRuntimeSnapshot(task: DelegatedTask, relatedTasks: DelegatedTask[] = []): Promise<TaskRuntimeSnapshot> {
+  const outputFiles = await runtimeOutputFiles([task, ...relatedTasks]);
+  const lastOutput = outputFiles.reduce<{ time: number; value?: string }>((latest, file) => {
+    if (!file.modifiedAt) return latest;
+    const time = Date.parse(file.modifiedAt);
+    return Number.isFinite(time) && time > latest.time ? { time, value: file.modifiedAt } : latest;
+  }, { time: 0 });
+  return {
+    durationMs: taskDurationMs(task),
+    outputBytes: outputFiles.reduce((total, file) => total + file.bytes, 0),
+    outputFiles,
+    lastOutputAt: lastOutput.value,
+    liveChangedFiles: await liveChangedFiles(task)
+  };
+}
+
+async function runtimeOutputFiles(tasks: DelegatedTask[]): Promise<TaskRuntimeSnapshot["outputFiles"]> {
+  const paths = unique(tasks.flatMap(task => artifactPaths(task)));
+  const files = await Promise.all(paths.map(async (path): Promise<TaskRuntimeSnapshot["outputFiles"][number] | undefined> => {
+    try {
+      const info = await stat(path);
+      if (!info.isFile() || info.size <= 0) return undefined;
+      return { path, bytes: info.size, modifiedAt: info.mtime.toISOString() };
+    } catch {
+      return undefined;
+    }
+  }));
+  return files.filter((file): file is TaskRuntimeSnapshot["outputFiles"][number] => file !== undefined);
+}
+
+async function liveChangedFiles(task: DelegatedTask): Promise<string[]> {
+  if (isActive(task)) return await changedFiles(task.workspace).catch(() => []);
+  return task.resultSummary?.changedFiles ?? stageResults(task).flatMap(result => result.changedFiles ?? []);
+}
+
+function taskDurationMs(task: DelegatedTask): number {
+  const created = Date.parse(task.createdAt);
+  if (!Number.isFinite(created)) return 0;
+  const end = isActive(task) ? Date.now() : Date.parse(task.updatedAt);
+  return Number.isFinite(end) ? Math.max(0, end - created) : 0;
+}
+
+function liveResultSummary(task: DelegatedTask, runtime: TaskRuntimeSnapshot, fallback: string): string {
+  const parts = [
+    `${task.status === "pending" ? "Task is pending" : "Task is running"}`,
+    `runtime ${formatDuration(runtime.durationMs)}`,
+    runtime.outputBytes > 0 ? `output ${formatBytes(runtime.outputBytes)}` : undefined,
+    runtime.lastOutputAt ? `last output ${runtime.lastOutputAt}` : undefined,
+    runtime.liveChangedFiles.length > 0 ? `${runtime.liveChangedFiles.length} live file changes` : undefined
+  ].filter((part): part is string => part !== undefined);
+  return parts.length > 1 ? `${parts.join(", ")}.` : fallback;
+}
+
+function stageResults(task: DelegatedTask): StageResult[] {
+  const maybeResults = (task.result as { results?: unknown } | undefined)?.results;
+  if (!Array.isArray(maybeResults)) return [];
+  return maybeResults.filter((result): result is StageResult => {
+    return typeof result === "object" && result !== null && typeof (result as StageResult).stage === "string";
+  });
+}
+
+function isActive(task: DelegatedTask): boolean {
+  return task.status === "running" || task.status === "pending";
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${rest}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function rollbackStateFor(task: DelegatedTask): DelegatedTask["rollback"] {
+  if (!task.gitCheckpoint?.supported) return task.rollback;
+  if (!task.gitCheckpoint.clean) return { status: "not_available", error: "Git checkpoint started dirty." };
+  if (!task.gitDiff || task.gitDiff.files.length === 0) return { status: "not_available", error: "No task diff is available." };
+  return { status: "ready" };
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -393,7 +553,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <label class="request-field">Verify command<input id="workflow-verify-command" name="verifyCommand" placeholder="optional, for example: npm test"></label>
         <div class="form-row" id="command-fields">
           <label>Command<select id="workflow-command" name="command"><option value="/ultrawork">/ultrawork</option><option value="/start-work">/start-work</option></select></label>
-          <label>Agent<select id="workflow-agent" name="preferredAgent"><option value="">Auto</option><option value="claude">Claude</option><option value="codex-cli">Codex CLI</option><option value="gemini">Gemini</option><option value="opencode">OpenCode</option><option value="codex">Codex handoff</option></select></label>
+          <label>Agent<select id="workflow-agent" name="preferredAgent"><option value="">Auto</option><option value="claude">Claude</option><option value="codex-cli">Codex CLI</option><option value="gemini">Gemini</option><option value="opencode">OpenCode</option><option value="myflicker">MyFlicker</option><option value="codex">Codex handoff</option></select></label>
         </div>
         <div class="form-row advanced-only" id="delegate-fields">
           <label>Stage<select id="workflow-stage" name="stage"><option value="implement">implement</option><option value="plan">plan</option><option value="review">review</option><option value="analyze">analyze</option></select></label>
@@ -425,6 +585,13 @@ const DASHBOARD_HTML = `<!doctype html>
         </div>
       </form>
     </section>
+    <section class="task-preview" id="task-preview" hidden>
+      <div class="panel-head">
+        <h2>Execution preview</h2>
+        <span class="meta" id="task-preview-status">Waiting for request</span>
+      </div>
+      <div id="task-preview-content" class="preview-content"></div>
+    </section>
     <section class="providers" id="providers" hidden></section>
     </section>
     <section class="catalog advanced-only" id="catalog" hidden></section>
@@ -437,7 +604,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <label>Workspace root<input id="stability-workspace-root" placeholder="/tmp/codex-claude-stability" required></label>
         <label class="request-field">Request<textarea id="stability-request" rows="3" placeholder="Describe the repeated task each provider should run" required></textarea></label>
         <div class="form-row">
-          <label>Providers<input id="stability-providers" value="claude,codex-cli,gemini" placeholder="claude,codex-cli,gemini"></label>
+          <label>Providers<input id="stability-providers" value="claude,codex-cli,gemini,myflicker" placeholder="claude,codex-cli,gemini,myflicker"></label>
           <label>Iterations<input id="stability-iterations" type="number" min="1" step="1" value="1"></label>
           <label>Verify command<input id="stability-verify-command" placeholder="optional"></label>
         </div>
@@ -453,15 +620,18 @@ const DASHBOARD_HTML = `<!doctype html>
       <aside class="task-list" aria-label="Tasks">
         <div class="list-head">
           <h2>Tasks</h2>
-          <select id="status-filter" aria-label="Filter by status">
-            <option value="">All statuses</option>
-            <option value="running">Running</option>
-            <option value="pending">Pending</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-            <option value="cancelled">Cancelled</option>
-            <option value="interrupted">Interrupted</option>
-          </select>
+          <div class="task-list-controls">
+            <label class="child-toggle" for="show-child-tasks"><input id="show-child-tasks" type="checkbox">Show child tasks</label>
+            <select id="status-filter" aria-label="Filter by status">
+              <option value="">All statuses</option>
+              <option value="running">Running</option>
+              <option value="pending">Pending</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="interrupted">Interrupted</option>
+            </select>
+          </div>
         </div>
         <div id="tasks" class="tasks"></div>
       </aside>
@@ -522,7 +692,19 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 .form-actions { display: flex; align-items: center; gap: 10px; }
 #workflow-submit { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
 .form-status { color: var(--muted); font-size: 13px; }
-.catalog, .providers, .stability { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.catalog, .providers, .stability, .task-preview { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.task-preview { align-content: start; }
+.preview-content { display: grid; gap: 10px; }
+.preview-risk { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 700; text-transform: capitalize; background: #eef2f7; color: var(--muted); }
+.preview-risk.low { background: #dcfce7; color: var(--ok); }
+.preview-risk.medium { background: #fef3c7; color: var(--warn); }
+.preview-risk.high { background: #fee2e2; color: var(--danger); }
+.preview-step-list, .preview-warning-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.preview-step, .preview-warning { border: 1px solid var(--line); border-radius: 6px; padding: 8px; display: grid; gap: 3px; min-width: 0; }
+.preview-step { background: #f8fafc; }
+.preview-warning.error { border-color: #fecaca; background: #fff5f5; }
+.preview-warning.warning { border-color: #fde68a; background: #fffbeb; }
+.preview-warning.info { border-color: #bfdbfe; background: #eff6ff; }
 .catalog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .catalog-list { display: grid; gap: 6px; }
 .catalog-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px; display: grid; gap: 4px; }
@@ -541,10 +723,14 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 .task-list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-height: 0; min-width: 0; }
 .task-list { display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
 .list-head { padding: 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.task-list-controls { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+.child-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.child-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
 select { border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--text); padding: 6px 8px; max-width: 160px; }
 .tasks { overflow-y: auto; overflow-x: hidden; }
 .task-row { width: 100%; min-width: 0; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: #fff; padding: 12px 14px; cursor: pointer; display: grid; gap: 7px; }
 .task-row:hover, .task-row.active { background: #f0fdfa; }
+.task-row.child-task { border-left: 3px solid #cbd5e1; padding-left: 11px; }
 .task-title { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
 .task-title strong { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status { font-size: 12px; border-radius: 999px; padding: 3px 8px; background: #eef2f7; color: var(--muted); text-transform: capitalize; }
@@ -558,6 +744,22 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .panel { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; background: #fff; }
 .actions { display: flex; gap: 8px; margin-top: 12px; }
+.user-progress-panel { display: grid; gap: 12px; }
+.progress-overview { display: grid; grid-template-columns: repeat(5, minmax(92px, 1fr)); gap: 8px; }
+.progress-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #f8fafc; display: grid; gap: 4px; }
+.progress-card span { color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }
+.progress-card strong { font-size: 22px; color: var(--text); }
+.plan-unit-list { display: grid; gap: 8px; }
+.plan-unit { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; grid-template-columns: 108px minmax(0, 1fr) auto; gap: 10px; align-items: start; background: #fff; min-width: 0; }
+.plan-unit.completed { border-color: #bbf7d0; background: #f7fef9; }
+.plan-unit.running { border-color: #bae6fd; background: #f0f9ff; }
+.plan-unit.failed, .plan-unit.interrupted { border-color: #fecaca; background: #fff7f7; }
+.plan-unit-label { color: var(--muted); font-weight: 700; font-size: 12px; text-transform: uppercase; overflow-wrap: anywhere; }
+.plan-unit-main { display: grid; gap: 4px; min-width: 0; }
+.plan-unit-title { font-weight: 700; overflow-wrap: anywhere; }
+.plan-unit-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.debug-details > summary { cursor: pointer; font-weight: 700; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.debug-details[open] > summary { margin-bottom: 10px; }
 .danger-button { border: 1px solid #fecaca; background: #fff1f2; color: var(--danger); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
 .danger-button:hover { border-color: var(--danger); }
 .secondary-button { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
@@ -568,6 +770,13 @@ select { border: 1px solid var(--line); border-radius: 6px; background: #fff; co
 .checklist li { display: grid; grid-template-columns: 24px 1fr; gap: 6px; font-size: 13px; }
 .checklist .done { color: var(--ok); }
 .checklist .todo { color: var(--muted); }
+.workflow-steps { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+.workflow-step { display: grid; grid-template-columns: 88px minmax(120px, 260px) minmax(0, 1fr); gap: 10px; align-items: start; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; font-size: 13px; }
+.workflow-step:first-child { border-top: 0; padding-top: 0; }
+.workflow-step-status { justify-self: start; white-space: nowrap; }
+.workflow-step-id { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
+.workflow-step-body { line-height: 1.45; overflow-wrap: anywhere; min-width: 0; }
+.workflow-step-empty { color: var(--muted); font-size: 13px; }
 .io-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .io-tab { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 6px; padding: 6px 9px; cursor: pointer; font-size: 12px; }
 .io-tab.active { border-color: var(--accent); background: #ccfbf1; color: #115e59; }
@@ -603,6 +812,10 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workspace { grid-template-columns: 1fr; grid-template-rows: 360px minmax(420px, 1fr); }
   .detail-grid { grid-template-columns: 1fr; }
+  .progress-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plan-unit { grid-template-columns: 1fr; }
+  .workflow-step { grid-template-columns: 88px minmax(0, 1fr); }
+  .workflow-step-body { grid-column: 1 / -1; }
 }
 
 :root {
@@ -627,7 +840,7 @@ h1 { font-size: 22px; letter-spacing: 0; }
 .mode-button.active { background: #14b8a6; color: #082f49; font-weight: 700; }
 #refresh { background: #f8fafc; border-color: #dbe3ee; color: #172033; }
 .launch-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 0.9fr); gap: 14px; align-items: stretch; }
-.new-task, .providers, .catalog, .metric, .task-list, .panel { border-color: var(--line); box-shadow: var(--shadow); }
+.new-task, .providers, .task-preview, .catalog, .metric, .task-list, .panel { border-color: var(--line); box-shadow: var(--shadow); }
 .new-task { padding: 16px; border-radius: 8px; }
 .tabbar { background: #f1f5f9; border: 1px solid #dbe3ee; border-radius: 8px; padding: 4px; }
 .tab { border: 0; background: transparent; color: #475569; font-size: 13px; }
@@ -646,7 +859,7 @@ h1 { font-size: 22px; letter-spacing: 0; }
   background: #fff;
 }
 #workflow-submit { background: #0f766e; border-color: #0f766e; font-weight: 700; padding: 9px 14px; }
-.providers { align-content: start; border-radius: 8px; }
+.providers, .task-preview { align-content: start; border-radius: 8px; }
 .stability { border-radius: 8px; }
 .provider-grid { grid-template-columns: 1fr; }
 .provider-card { background: #f8fafc; border-radius: 8px; }
@@ -666,6 +879,24 @@ h1 { font-size: 22px; letter-spacing: 0; }
 .detail { padding-bottom: 4px; }
 .panel { border-radius: 8px; }
 .detail-grid { align-items: start; }
+.result-summary-panel { border-color: #99f6e4; background: #f0fdfa; }
+.result-lede { font-size: 14px; line-height: 1.5; margin-bottom: 10px; }
+.result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 12px; }
+.result-block { margin-top: 10px; }
+.guardrail-list { display: grid; gap: 8px; margin-top: 8px; }
+.guardrail-item { border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb; padding: 8px 10px; display: grid; gap: 3px; }
+.guardrail-item.error { border-color: #fecaca; background: #fff5f5; }
+.guardrail-item.warning { border-color: #fde68a; background: #fffbeb; }
+.project-memory-panel { border-color: #bae6fd; background: #f8fcff; }
+.memory-list { display: grid; gap: 8px; margin-top: 10px; }
+.memory-entry { border: 1px solid #dbeafe; background: #ffffff; border-radius: 6px; padding: 8px 10px; display: grid; gap: 4px; }
+.memory-entry strong { font-size: 13px; }
+.runtime-panel { border-color: #bfdbfe; background: #f8fbff; }
+.runtime-line { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.runtime-line strong { color: var(--text); font-size: 12px; }
+.runtime-file-list { display: grid; gap: 6px; margin-top: 8px; }
+.runtime-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 8px; background: #fff; font-size: 12px; }
+.runtime-file span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kv { grid-template-columns: 132px minmax(0, 1fr); }
 pre { background: #0b1020; border: 1px solid #1e293b; }
 .io-tab.active { background: #0f766e; color: #fff; }
@@ -679,12 +910,14 @@ pre { background: #0b1020; border: 1px solid #1e293b; }
   .topbar { align-items: stretch; flex-direction: column; }
   .top-actions { justify-content: space-between; }
   .provider-grid { grid-template-columns: 1fr; }
+  .list-head { align-items: stretch; flex-direction: column; }
+  .task-list-controls { justify-content: space-between; }
 }`;
 
 const DASHBOARD_JS = `const SIMPLE_COMMANDS = ["ultrawork", "start-work", "plan-work", "review-work", "explore"];
 const SIMPLE_COMMAND_SET = new Set(SIMPLE_COMMANDS);
 
-const state = { tasks: [], commands: [], stabilityRuns: [], mode: "simple", selectedTaskId: undefined, filter: "", selectedIoTab: undefined, capabilities: { liveTaskManager: false, liveTaskTools: false, liveStabilityRunner: false } };
+const state = { tasks: [], commands: [], stabilityRuns: [], projectMemoryByWorkspace: {}, mode: "simple", selectedTaskId: undefined, filter: "", showChildren: false, selectedIoTab: undefined, lastPreview: undefined, capabilities: { liveTaskManager: false, liveTaskTools: false, liveStabilityRunner: false } };
 
 const els = {
   workflowPanel: document.getElementById("workflow-panel"),
@@ -700,6 +933,9 @@ const els = {
   stabilityStatus: document.getElementById("stability-status"),
   stabilityRuns: document.getElementById("stability-runs"),
   providers: document.getElementById("providers"),
+  taskPreview: document.getElementById("task-preview"),
+  taskPreviewStatus: document.getElementById("task-preview-status"),
+  taskPreviewContent: document.getElementById("task-preview-content"),
   metrics: document.getElementById("metrics"),
   tasks: document.getElementById("tasks"),
   detail: document.getElementById("detail"),
@@ -709,6 +945,7 @@ const els = {
   simpleMode: document.getElementById("simple-mode"),
   advancedMode: document.getElementById("advanced-mode"),
   filter: document.getElementById("status-filter"),
+  showChildren: document.getElementById("show-child-tasks"),
   form: document.getElementById("workflow-form"),
   submit: document.getElementById("workflow-submit"),
   formStatus: document.getElementById("workflow-status"),
@@ -748,6 +985,10 @@ els.filter.addEventListener("change", event => {
   state.filter = event.target.value;
   renderTasks();
 });
+els.showChildren.addEventListener("change", event => {
+  state.showChildren = event.target.checked;
+  renderTasks();
+});
 els.form.addEventListener("submit", event => {
   event.preventDefault();
   submitWorkflow();
@@ -756,6 +997,10 @@ els.stabilityForm.addEventListener("submit", event => {
   event.preventDefault();
   submitStabilityRun();
 });
+for (const field of els.form.querySelectorAll("input, textarea, select")) {
+  field.addEventListener("input", scheduleTaskPreview);
+  field.addEventListener("change", scheduleTaskPreview);
+}
 for (const tab of document.querySelectorAll("[data-tab]")) {
   tab.addEventListener("click", () => setTab(tab.dataset.tab));
 }
@@ -785,9 +1030,10 @@ function setTab(tab) {
   els.request.required = tab !== "execute-plan";
   els.submit.textContent = tab === "create-plan" ? "Create plan" : tab === "execute-plan" ? "Execute plan" : tab === "auto" ? "Auto dispatch" : tab === "command" ? "Run command" : "Delegate task";
   els.formStatus.textContent = "";
+  scheduleTaskPreview();
 }
 
-async function submitWorkflow() {
+function workflowPayload() {
   const tab = state.tab || "command";
   const workspace = els.workspace.value.trim();
   const request = els.request.value.trim();
@@ -839,6 +1085,11 @@ async function submitWorkflow() {
     body.planPath = els.planPath.value.trim() || undefined;
     body.executorProfile = els.executorProfile.value.trim() || undefined;
   }
+  return { tab, endpoint, body };
+}
+
+async function submitWorkflow() {
+  const { endpoint, body } = workflowPayload();
   els.formStatus.textContent = "Running...";
   els.submit.disabled = true;
   try {
@@ -859,14 +1110,103 @@ async function submitWorkflow() {
   }
 }
 
-async function loadTasks() {
+let previewTimer;
+function scheduleTaskPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(loadTaskPreview, 500);
+}
+
+async function loadTaskPreview() {
+  if (!state.capabilities.liveTaskTools || !els.taskPreview || els.taskPreview.hidden) return;
+  const { body } = workflowPayload();
+  if (!body.workspace) {
+    els.taskPreviewStatus.textContent = "Workspace required";
+    els.taskPreviewContent.innerHTML = '<span class="meta">Enter a workspace to preview execution.</span>';
+    return;
+  }
+  els.taskPreviewStatus.textContent = "Checking...";
+  try {
+    const response = await fetch("/api/task-preview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Preview failed");
+    state.lastPreview = data.preview;
+    els.taskPreviewStatus.textContent = "Ready";
+    els.taskPreviewContent.innerHTML = renderTaskPreview(data.preview);
+    const applyButton = els.taskPreviewContent.querySelector("[data-apply-preview]");
+    if (applyButton) applyButton.addEventListener("click", applyRecommendedSetup);
+  } catch (error) {
+    els.taskPreviewStatus.textContent = "Unavailable";
+    els.taskPreviewContent.innerHTML = '<span class="meta">' + escapeHtml(error.message || String(error)) + '</span>';
+  }
+}
+
+function applyRecommendedSetup() {
+  const setup = state.lastPreview?.recommendedSetup;
+  if (!setup) return;
+  if (setup.tab && setup.tab !== "command") setMode("advanced");
+  if (setup.tab) setTab(setup.tab);
+  if (setup.command && els.command) els.command.value = setup.command;
+  if (setup.mode && els.mode) els.mode.value = setup.mode;
+  if (setup.strategy && els.strategy) els.strategy.value = setup.strategy;
+  if (setup.preferredAgent !== undefined && els.agent) els.agent.value = setup.preferredAgent;
+  if (setup.stage && els.stage) els.stage.value = setup.stage;
+  if (setup.profile !== undefined && els.profile) els.profile.value = setup.profile || "";
+  els.formStatus.textContent = setup.requiresConfirmation
+    ? "Recommended setup applied. Review warnings before running."
+    : "Recommended setup applied.";
+  scheduleTaskPreview();
+}
+
+function renderTaskPreview(preview) {
+  if (!preview) return '<span class="meta">No preview available.</span>';
+  const warnings = preview.warnings || [];
+  const steps = preview.executionPlan || [];
+  return \`
+    <span class="preview-risk \${escapeAttr(preview.risk?.level || "low")}">\${escapeHtml(preview.risk?.level || "low")} risk · \${escapeHtml(String(preview.risk?.score ?? 0))}</span>
+    <div class="result-grid">
+      \${kv("Strategy", preview.strategy || "")}
+      \${kv("Will edit", preview.willModifyFiles ? "yes" : "no")}
+      \${kv("Verification", preview.verification?.configured ? preview.verification.command || "configured" : "not configured")}
+    </div>
+    <div>
+      <h3>Execution</h3>
+      <ul class="preview-step-list">\${steps.map(step => \`
+        <li class="preview-step">
+          <strong>\${escapeHtml(step.role || "step")}</strong>
+          <span class="meta">\${escapeHtml([step.stage, step.profile, step.provider, step.count ? "x" + step.count : ""].filter(Boolean).join(" / "))}</span>
+        </li>
+      \`).join("")}</ul>
+    </div>
+    <div>
+      <h3>Warnings</h3>
+      \${warnings.length > 0 ? '<ul class="preview-warning-list">' + warnings.map(warning => \`
+        <li class="preview-warning \${escapeAttr(warning.severity || "info")}">
+          <strong>\${escapeHtml(warning.code || "warning")} / \${escapeHtml(warning.severity || "info")}</strong>
+          <span class="meta">\${escapeHtml(warning.message || "")}</span>
+        </li>
+      \`).join("") + '</ul>' : '<span class="meta">No blocking risks detected.</span>'}
+    </div>
+    <div>
+      <h3>Recommended action</h3>
+      <span class="meta">\${escapeHtml(preview.recommendedAction || "Run the task.")}</span>
+    </div>
+    \${preview.recommendedSetup ? '<button class="secondary-button" type="button" data-apply-preview>Apply recommended setup</button>' : ''}
+    \${preview.recommendedSetup?.notes?.length ? '<ul class="finding-list">' + preview.recommendedSetup.notes.map(note => '<li>' + escapeHtml(note) + '</li>').join("") + '</ul>' : ''}
+  \`;
+}
+
+async function loadTasks(options = {}) {
   const response = await fetch("/api/tasks");
   const data = await response.json();
   state.tasks = data.tasks || [];
   els.updated.textContent = "Updated " + new Date(data.generatedAt || Date.now()).toLocaleString();
   renderMetrics(data.summary || {});
   renderTasks();
-  if (state.selectedTaskId) await loadDetail(state.selectedTaskId);
+  if (state.selectedTaskId) await loadDetail(state.selectedTaskId, { preserveViewState: options.preserveDetailView !== false });
 }
 
 async function loadCapabilities() {
@@ -874,12 +1214,14 @@ async function loadCapabilities() {
   const data = await response.json();
   state.capabilities = data;
   els.workflowPanel.hidden = !data.liveTaskTools;
+  els.taskPreview.hidden = !data.liveTaskTools;
   els.catalog.hidden = !data.liveTaskTools;
   els.providers.hidden = !data.liveTaskTools;
   els.stabilityPanel.hidden = !data.liveStabilityRunner;
   if (data.liveTaskTools) await loadProviders();
   if (data.liveTaskTools) await loadCatalog();
   if (data.liveTaskTools) await loadCommands();
+  if (data.liveTaskTools) scheduleTaskPreview();
   if (data.liveStabilityRunner) await loadStabilityRuns();
 }
 
@@ -1085,17 +1427,35 @@ function labelValue(label, value) {
   return value ? label + ": " + value : "";
 }
 
+function renderTaskRuntimeLine(task) {
+  const runtime = task.runtime;
+  if (!runtime) return "";
+  const parts = [
+    formatDuration(runtime.durationMs),
+    runtime.outputBytes > 0 ? formatBytes(runtime.outputBytes) + " output" : "",
+    runtime.lastOutputAt ? "last " + formatTime(runtime.lastOutputAt) : "",
+    (runtime.liveChangedFiles || []).length > 0 ? String(runtime.liveChangedFiles.length) + " files" : ""
+  ].filter(Boolean);
+  if (parts.length === 0) return "";
+  return '<span class="meta runtime-line"><strong>Runtime</strong><span>' + escapeHtml(parts.join(" / ")) + '</span></span>';
+}
+
 function renderTasks() {
-  const tasks = state.filter ? state.tasks.filter(task => task.status === state.filter) : state.tasks;
+  const tasks = visibleTasks();
   if (tasks.length === 0) {
-    els.tasks.innerHTML = '<div class="empty">No tasks match this filter.</div>';
+    const hiddenChildren = hiddenChildTaskCount();
+    const message = hiddenChildren > 0 && !state.showChildren
+      ? "No parent tasks match this filter. " + hiddenChildren + " child tasks hidden."
+      : "No tasks match this filter.";
+    els.tasks.innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
     return;
   }
   els.tasks.innerHTML = tasks.map(task => \`
-    <button class="task-row \${task.id === state.selectedTaskId ? "active" : ""}" type="button" data-task-id="\${escapeAttr(task.id)}">
-      <span class="task-title"><strong>\${escapeHtml(task.request || task.id)}</strong><span class="status \${escapeAttr(task.status)}">\${escapeHtml(task.status)}</span></span>
+    <button class="task-row \${task.id === state.selectedTaskId ? "active" : ""} \${task.parentTaskId ? "child-task" : ""}" type="button" data-task-id="\${escapeAttr(task.id)}">
+      <span class="task-title"><strong>\${escapeHtml(task.request || task.id)}</strong><span class="status \${escapeAttr(task.status)}">\${escapeHtml(displayTaskStatus(task))}</span></span>
       <span class="meta">\${escapeHtml(task.workspace)}</span>
       <span class="meta">\${escapeHtml([task.kind === "workflow" ? "workflow" : "", task.parentTaskId ? "child of " + task.parentTaskId : "", task.profile, task.category, task.preferredAgent, (task.stages || []).join(" -> ")].filter(Boolean).join(" / "))}</span>
+      \${renderTaskRuntimeLine(task)}
       \${task.verification ? '<span class="meta">verify: ' + escapeHtml(task.verification.status) + (task.verification.repairTaskId ? ' / repair ' + escapeHtml(task.verification.repairTaskId) : '') + '</span>' : ''}
     </button>
   \`).join("");
@@ -1104,7 +1464,27 @@ function renderTasks() {
   }
 }
 
-async function loadDetail(taskId) {
+function visibleTasks() {
+  return state.tasks.filter(task => {
+    if (!state.showChildren && task.parentTaskId) return false;
+    if (state.filter && task.status !== state.filter) return false;
+    return true;
+  });
+}
+
+function hiddenChildTaskCount() {
+  return state.tasks.filter(task => task.parentTaskId && (!state.filter || task.status === state.filter)).length;
+}
+
+function displayTaskStatus(task) {
+  if (task?.status === "completed" && task?.verification?.status === "passed" && task?.verification?.repairTaskId) return "completed after repair";
+  return task?.status || "unknown";
+}
+
+async function loadDetail(taskId, options = {}) {
+  const previousViewState = options.preserveViewState && state.selectedTaskId === taskId
+    ? captureDetailViewState()
+    : undefined;
   state.selectedTaskId = taskId;
   renderTasks();
   const response = await fetch("/api/tasks/" + encodeURIComponent(taskId));
@@ -1115,7 +1495,7 @@ async function loadDetail(taskId) {
     els.detail.innerHTML = '<div class="panel">' + escapeHtml(data.error || "Failed to load task") + '</div>';
     return;
   }
-  renderDetail(data.task, data.output || {}, data.relatedTasks || []);
+  renderDetail(data.task, data.output || {}, data.relatedTasks || [], previousViewState);
 }
 
 async function cancelTask(taskId) {
@@ -1140,76 +1520,93 @@ async function rerunTask(taskId, action) {
   if (data.taskId) await loadDetail(data.taskId);
 }
 
-function renderDetail(task, output, relatedTasks) {
+async function rollbackTask(taskId) {
+  if (!confirm("Rollback this task's git changes? This only runs when the task checkpoint was clean.")) return;
+  const response = await fetch("/api/tasks/" + encodeURIComponent(taskId) + "/rollback", { method: "POST" });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Rollback failed");
+    await loadTasks();
+    await loadDetail(taskId);
+    return;
+  }
+  await loadTasks();
+  await loadDetail(taskId);
+}
+
+function renderDetail(task, output, relatedTasks, previousViewState) {
   const summary = output.transcriptSummary;
   const plan = task.workflow?.summary ? workflowPlanSummary(task, output.planSummary) : output.planSummary;
-  const canCancel = state.capabilities.liveTaskManager && (task.status === "running" || task.status === "pending");
-  const canRetry = task.kind !== "workflow" && state.capabilities.liveTaskTools && ["failed", "interrupted", "cancelled"].includes(task.status);
-  const canRetryFailedParts = task.kind === "workflow" && state.capabilities.liveTaskManager && ["failed", "interrupted", "cancelled"].includes(task.status);
-  const canResume = canRetry && Boolean(task.agentSessionId || summary?.sessionId);
   els.empty.hidden = true;
   els.detail.hidden = false;
   els.detail.innerHTML = \`
+    \${renderRequirementProgressPanel(task, output, relatedTasks || [])}
+    \${renderPlanUnitsPanel(task, output, relatedTasks || [])}
+    \${renderResultSummaryPanel(task)}
     \${renderOutcomePanel(task, output)}
-    \${renderWorkflowMap(task, relatedTasks || [])}
-    <div class="detail-grid">
-      <div class="panel">
-        <h3>Task</h3>
-        \${kv("ID", task.id)}
-        \${kv("Status", task.status)}
-        \${kv("Run ID", task.runId)}
-        \${kv("Kind", task.kind || "task")}
-        \${kv("Workspace", task.workspace)}
-        \${kv("Stages", (task.stages || []).join(" -> "))}
-        \${kv("Plan", task.planId || "")}
-        \${kv("Plan path", task.planPath || "")}
-        \${kv("Parent task", task.parentTaskId || "")}
-        \${kv("Child tasks", summarizeIdList(task.childTaskIds || []))}
-        \${kv("Depends on", summarizeIdList(task.dependsOnTaskIds || []))}
-        \${kv("Review task", task.reviewTaskId || "")}
-        \${task.workflow?.summary ? kv("Workflow", workflowSummary(task.workflow.summary)) : ""}
-        \${kv("Retry of", task.retryOf || "")}
-        \${kv("Resume of", task.resumeOf || "")}
-        \${kv("Repair of", task.repairOf || "")}
-        \${kv("Profile", task.profile || "")}
-        \${kv("Category", task.category || "")}
-        \${kv("Preferred agent", task.preferredAgent || "")}
-        \${kv("Requested model", task.model || "")}
-        \${kv("Effort", task.effort || "")}
-        \${kv("Timeout", task.timeoutMs ? String(task.timeoutMs) + "ms" : "")}
-        \${kv("Verify command", task.verifyCommand || "")}
-        \${kv("Repair attempt", task.repairAttempt !== undefined ? String(task.repairAttempt) : "")}
-        \${kv("Max repairs", task.maxRepairAttempts !== undefined ? String(task.maxRepairAttempts) : "")}
-        \${kv("Skills", (task.skills || []).map(skill => skill.name).join(", "))}
-        \${canCancel || canRetry || canResume || canRetryFailedParts ? '<div class="actions">' +
-          (canCancel ? '<button class="danger-button" type="button" data-cancel-task="' + escapeAttr(task.id) + '">Cancel task</button>' : '') +
-          (canRetryFailedParts ? '<button class="secondary-button" type="button" data-retry-failed-parts="' + escapeAttr(task.id) + '">Retry failed parts</button>' : '') +
-          (canRetry ? '<button class="secondary-button" type="button" data-retry-task="' + escapeAttr(task.id) + '">Retry</button>' : '') +
-          (canResume ? '<button class="secondary-button" type="button" data-resume-task="' + escapeAttr(task.id) + '">Resume</button>' : '') +
-          '</div>' : ''}
-      </div>
-      <div class="panel">
-        <h3>Claude</h3>
-        \${kv("Session", summary?.sessionId || task.agentSessionId || "")}
-        \${kv("Actual models", (summary?.models || []).join(", "))}
-        \${kv("Tool calls", String(summary?.toolCalls?.length || 0))}
-        \${kv("Tokens", summary ? String(summary.usage.inputTokens + summary.usage.outputTokens) : "")}
-      </div>
-    </div>
-    \${renderWorkflowStatePanel(task)}
+    \${renderProjectMemoryPanel(task)}
     \${renderVerificationPanel(task)}
-    \${plan ? renderPlanSummary(plan) : ''}
-    \${renderChangedFilesPanel(task, summary)}
-    \${renderFindingsPanel(task, output)}
-    \${renderLiveIo(output)}
-    <div class="panel section">
-      <h3>Artifacts</h3>
-      \${(output.artifacts || []).map(artifact => '<h3>' + escapeHtml(artifact.path) + '</h3><pre>' + escapeHtml(artifact.content) + '</pre>').join("") || '<span class="meta">No artifact output available.</span>'}
-    </div>
-    <div class="panel section">
-      <h3>Transcript timeline</h3>
-      <pre>\${escapeHtml((summary?.timeline || []).map(item => [item.timestamp, item.type, item.summary].filter(Boolean).join(" | ")).join("\\n") || "No transcript summary available.")}</pre>
-    </div>
+    <details class="panel section debug-details advanced-only">
+      <summary><span>Technical details</span><span class="meta">sessions, logs, artifacts, transcript</span></summary>
+      \${renderRuntimePanel(task)}
+      \${renderWorkflowMap(task, relatedTasks || [])}
+      <div class="detail-grid">
+        <div class="panel">
+          <h3>Task metadata</h3>
+          \${kv("ID", task.id)}
+          \${kv("Status", task.status)}
+          \${kv("Run ID", task.runId)}
+          \${kv("Kind", task.kind || "task")}
+          \${kv("Workspace", task.workspace)}
+          \${kv("Stages", (task.stages || []).join(" -> "))}
+          \${kv("Plan", task.planId || "")}
+          \${kv("Plan path", task.planPath || "")}
+          \${kv("Parent task", task.parentTaskId || "")}
+          \${kv("Child tasks", summarizeIdList(task.childTaskIds || []))}
+          \${kv("Depends on", summarizeIdList(task.dependsOnTaskIds || []))}
+          \${kv("Review task", task.reviewTaskId || "")}
+          \${task.workflow?.summary ? kv("Workflow", workflowSummary(task.workflow.summary)) : ""}
+          \${kv("Retry of", task.retryOf || "")}
+          \${kv("Resume of", task.resumeOf || "")}
+          \${kv("Repair of", task.repairOf || "")}
+          \${kv("Continuation of", task.continuationOf || "")}
+          \${kv("Continuation task", task.continuationTaskId || "")}
+          \${kv("Profile", task.profile || "")}
+          \${kv("Category", task.category || "")}
+          \${kv("Preferred agent", task.preferredAgent || "")}
+          \${kv("Requested model", task.model || "")}
+          \${kv("Effort", task.effort || "")}
+          \${kv("Timeout", task.timeoutMs ? String(task.timeoutMs) + "ms" : "")}
+          \${kv("Verify command", task.verifyCommand || "")}
+          \${kv("Repair attempt", task.repairAttempt !== undefined ? String(task.repairAttempt) : "")}
+          \${kv("Max repairs", task.maxRepairAttempts !== undefined ? String(task.maxRepairAttempts) : "")}
+          \${kv("Continuation attempt", task.continuationAttempt !== undefined ? String(task.continuationAttempt) : "")}
+          \${kv("Max continuations", task.maxContinuationAttempts !== undefined ? String(task.maxContinuationAttempts) : "")}
+          \${kv("Skills", (task.skills || []).map(skill => skill.name).join(", "))}
+        </div>
+        <div class="panel">
+          <h3>Agent</h3>
+          \${kv("Session", summary?.sessionId || task.agentSessionId || "")}
+          \${kv("Actual models", (summary?.models || []).join(", "))}
+          \${kv("Tool calls", String(summary?.toolCalls?.length || 0))}
+          \${kv("Tokens", summary ? String(summary.usage.inputTokens + summary.usage.outputTokens) : "")}
+        </div>
+      </div>
+      \${renderWorkflowStatePanel(task)}
+      \${plan ? renderPlanSummary(plan) : ''}
+      \${renderDiffPanel(task)}
+      \${renderChangedFilesPanel(task, summary)}
+      \${renderFindingsPanel(task, output)}
+      \${renderLiveIo(output)}
+      <div class="panel section">
+        <h3>Artifacts</h3>
+        \${(output.artifacts || []).map(artifact => '<h3>' + escapeHtml(artifact.path) + '</h3><pre>' + escapeHtml(artifact.content) + '</pre>').join("") || '<span class="meta">No artifact output available.</span>'}
+      </div>
+      <div class="panel section">
+        <h3>Transcript timeline</h3>
+        <pre>\${escapeHtml((summary?.timeline || []).map(item => [item.timestamp, item.type, item.summary].filter(Boolean).join(" | ")).join("\\n") || "No transcript summary available.")}</pre>
+      </div>
+    </details>
   \`;
   const cancelButton = els.detail.querySelector("[data-cancel-task]");
   if (cancelButton) cancelButton.addEventListener("click", () => cancelTask(task.id));
@@ -1219,14 +1616,116 @@ function renderDetail(task, output, relatedTasks) {
   if (retryFailedPartsButton) retryFailedPartsButton.addEventListener("click", () => rerunTask(task.id, "retry-failed-parts"));
   const resumeButton = els.detail.querySelector("[data-resume-task]");
   if (resumeButton) resumeButton.addEventListener("click", () => rerunTask(task.id, "resume"));
+  const rollbackButton = els.detail.querySelector("[data-rollback-task]");
+  if (rollbackButton) rollbackButton.addEventListener("click", () => rollbackTask(task.id));
   for (const button of els.detail.querySelectorAll("[data-io-tab]")) {
     button.addEventListener("click", () => selectIoTab(button.dataset.ioTab));
   }
+  restoreDetailViewState(previousViewState);
+  void loadProjectMemory(task.workspace);
+}
+
+async function loadProjectMemory(workspace) {
+  if (!workspace) return;
+  try {
+    const response = await fetch("/api/project-memory?workspace=" + encodeURIComponent(workspace));
+    const data = await response.json();
+    state.projectMemoryByWorkspace[workspace] = data;
+  } catch (error) {
+    state.projectMemoryByWorkspace[workspace] = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  renderProjectMemoryContent(workspace);
+}
+
+function renderProjectMemoryPanel(task) {
+  return \`
+    <div class="panel section project-memory-panel">
+      <h3>Project memory</h3>
+      <div data-project-memory-workspace="\${escapeAttr(task.workspace || "")}">
+        <span class="meta">Loading remembered project context...</span>
+      </div>
+    </div>
+  \`;
+}
+
+function renderProjectMemoryContent(workspace) {
+  const target = Array.from(els.detail.querySelectorAll("[data-project-memory-workspace]"))
+    .find(item => item.dataset.projectMemoryWorkspace === workspace);
+  if (!target) return;
+  const memory = state.projectMemoryByWorkspace[workspace];
+  if (!memory) {
+    target.innerHTML = '<span class="meta">Loading remembered project context...</span>';
+    return;
+  }
+  if (!memory.ok) {
+    target.innerHTML = '<span class="meta">Project memory unavailable: ' + escapeHtml(memory.error || "unknown error") + '</span>';
+    return;
+  }
+  const entries = memory.entries || [];
+  if (entries.length === 0) {
+    target.innerHTML = '<span class="meta">No project memory recorded yet. Completed tasks will populate this automatically.</span>';
+    return;
+  }
+  target.innerHTML = \`
+    <span class="meta">Stored at \${escapeHtml(memory.markdownPath || "")}</span>
+    <div class="memory-list">\${entries.slice(0, 5).map(entry => \`
+      <div class="memory-entry">
+        <strong>\${escapeHtml(entry.request || entry.taskId || "Task")}</strong>
+        <span class="meta">\${escapeHtml([entry.status, entry.providerAttempts?.join(" -> "), entry.verificationStatus ? "verify " + entry.verificationStatus : ""].filter(Boolean).join(" / "))}</span>
+        <span>\${escapeHtml(entry.summary || "-")}</span>
+        \${(entry.changedFiles || []).length > 0 ? '<span class="meta">Files: ' + escapeHtml(entry.changedFiles.join(", ")) + '</span>' : ''}
+      </div>
+    \`).join("")}</div>
+  \`;
+}
+
+function captureDetailViewState() {
+  return {
+    scrollTop: els.detail.scrollTop,
+    openDetails: Array.from(els.detail.querySelectorAll("details")).map((item, index) => item.open ? String(index) : "").filter(Boolean),
+    preScrolls: Array.from(els.detail.querySelectorAll("pre")).map((item, index) => ({ index, scrollTop: item.scrollTop, scrollLeft: item.scrollLeft }))
+  };
+}
+
+function restoreDetailViewState(viewState) {
+  if (!viewState) return;
+  const openDetails = new Set(viewState.openDetails || []);
+  Array.from(els.detail.querySelectorAll("details")).forEach((item, index) => {
+    item.open = openDetails.has(String(index));
+  });
+  for (const saved of viewState.preScrolls || []) {
+    const item = els.detail.querySelectorAll("pre")[saved.index];
+    if (!item) continue;
+    item.scrollTop = saved.scrollTop || 0;
+    item.scrollLeft = saved.scrollLeft || 0;
+  }
+  els.detail.scrollTop = viewState.scrollTop || 0;
+}
+
+function renderDiffPanel(task) {
+  const diff = task.gitDiff;
+  const checkpoint = task.gitCheckpoint;
+  if (!diff && !checkpoint) return "";
+  return \`
+    <div class="panel section diff-panel">
+      <div class="panel-head">
+        <h3>Git diff</h3>
+        <span class="meta">\${escapeHtml(task.rollback?.status || "not available")}</span>
+      </div>
+      \${kv("Checkpoint", checkpoint?.supported ? (checkpoint.clean ? "clean" : "dirty") : checkpoint?.error || "not available")}
+      \${kv("HEAD", checkpoint?.head || "")}
+      \${kv("Files", String((diff?.files || []).length))}
+      \${task.rollback?.error ? kv("Rollback", task.rollback.error) : ""}
+      <div class="pill-line">\${(diff?.files || []).map(file => '<span class="pill">' + escapeHtml(file.status + ': ' + file.path) + '</span>').join("") || '<span class="meta">No git file changes recorded.</span>'}</div>
+      \${diff?.patch ? '<pre>' + escapeHtml(diff.patch) + '</pre>' : '<span class="meta">No tracked-file patch available.</span>'}
+    </div>
+  \`;
 }
 
 function renderWorkflowStatePanel(task) {
   const workflowState = task.workflow?.state;
   if (!workflowState) return "";
+  const steps = workflowState.steps || [];
   return \`
     <div class="panel section">
       <h3>Workflow state</h3>
@@ -1234,8 +1733,271 @@ function renderWorkflowStatePanel(task) {
       \${kv("Next action", workflowState.nextAction?.kind || "")}
       \${kv("Reason", workflowState.nextAction?.reason || "")}
       \${kv("State path", workflowState.statePath || task.workflow?.statePath || "")}
-      <ul class="checklist">\${(workflowState.steps || []).map(step => '<li><span class="' + (step.status === 'completed' ? 'done' : 'todo') + '">' + escapeHtml(step.status || '') + '</span><span>' + escapeHtml((step.kind || 'task') + ' ' + (step.taskId || '') + ': ' + (step.text || '')) + '</span></li>').join("") || '<li><span></span><span class="meta">No workflow steps recorded.</span></li>'}</ul>
+      <ul class="workflow-steps">\${steps.map(step => '<li class="workflow-step"><span class="status workflow-step-status ' + escapeAttr(step.status || '') + '">' + escapeHtml(step.status || 'unknown') + '</span><span class="workflow-step-id">' + escapeHtml((step.kind || 'task') + ' ' + (step.taskId || '')) + '</span><span class="workflow-step-body">' + escapeHtml(step.text || '') + '</span></li>').join("") || '<li class="workflow-step-empty">No workflow steps recorded.</li>'}</ul>
       \${(workflowState.learnings || []).length > 0 ? '<h3>Learnings</h3><ul class="finding-list">' + workflowState.learnings.map(learning => '<li>' + escapeHtml(learning.taskId + ': ' + learning.summary) + '</li>').join("") + '</ul>' : ''}
+    </div>
+  \`;
+}
+
+function renderRequirementProgressPanel(task, output, relatedTasks) {
+  const units = buildExecutionUnits(task, output, relatedTasks);
+  const total = units.length || 1;
+  const completed = units.filter(unit => unit.status === "completed").length;
+  const running = units.filter(unit => unit.status === "running").length;
+  const failed = units.filter(unit => unit.status === "failed" || unit.status === "interrupted").length;
+  const pending = units.filter(unit => unit.status === "pending").length;
+  const progressPercent = Math.round((completed / total) * 100);
+  const planPath = task.planPath || output.planSummary?.path || "";
+  return \`
+    <div class="panel section user-progress-panel">
+      <div class="panel-head">
+        <h3>Requirement progress</h3>
+        <span class="status \${escapeAttr(task.status)}">\${escapeHtml(displayTaskStatus(task))}</span>
+      </div>
+      <div class="progress-overview">
+        <div class="progress-card"><span>Plan units</span><strong>\${escapeHtml(total)}</strong></div>
+        <div class="progress-card"><span>Completed</span><strong>\${escapeHtml(completed)}</strong></div>
+        <div class="progress-card"><span>Running</span><strong>\${escapeHtml(running)}</strong></div>
+        <div class="progress-card"><span>Pending</span><strong>\${escapeHtml(pending)}</strong></div>
+        <div class="progress-card"><span>Failed</span><strong>\${escapeHtml(failed)}</strong></div>
+      </div>
+      <div class="progress-track"><div class="progress-fill" style="width: \${progressPercent}%"></div></div>
+      <div class="result-grid">
+        \${kv("Progress", String(completed) + "/" + String(total) + " (" + String(progressPercent) + "%)")}
+        \${kv("Workspace", task.workspace || "")}
+        \${kv("Plan ID", task.planId || "")}
+        \${kv("Plan file", planPath)}
+      </div>
+      \${renderTaskActionButtons(task, output)}
+    </div>
+  \`;
+}
+
+function renderPlanUnitsPanel(task, output, relatedTasks) {
+  const units = buildExecutionUnits(task, output, relatedTasks);
+  return \`
+    <div class="panel section">
+      <div class="panel-head">
+        <h3>Plan units</h3>
+        <span class="meta">\${escapeHtml(String(units.length || 1))} execution item\${(units.length || 1) === 1 ? "" : "s"}</span>
+      </div>
+      <div class="plan-unit-list">
+        \${units.map(unit => \`
+          <div class="plan-unit \${escapeAttr(unit.status)}">
+            <span class="plan-unit-label">\${escapeHtml(unit.label)}</span>
+            <span class="plan-unit-main">
+              <span class="plan-unit-title">\${escapeHtml(unit.title)}</span>
+              <span class="plan-unit-meta">\${escapeHtml(unit.meta)}</span>
+            </span>
+            <span class="status \${escapeAttr(unit.status)}">\${escapeHtml(unit.status)}</span>
+          </div>
+        \`).join("")}
+      </div>
+    </div>
+  \`;
+}
+
+function buildExecutionUnits(task, output, relatedTasks) {
+  const workflowSteps = task.workflow?.state?.steps || [];
+  const stepByTaskId = new Map(workflowSteps.filter(step => step.taskId).map(step => [step.taskId, step]));
+  const orderedIds = [...(task.childTaskIds || [])];
+  if (task.reviewTaskId && !orderedIds.includes(task.reviewTaskId)) orderedIds.push(task.reviewTaskId);
+  const order = new Map(orderedIds.map((id, index) => [id, index]));
+  const related = [...(relatedTasks || [])].sort((a, b) => {
+    const left = order.has(a.id) ? order.get(a.id) : Number.MAX_SAFE_INTEGER;
+    const right = order.has(b.id) ? order.get(b.id) : Number.MAX_SAFE_INTEGER;
+    return left - right;
+  });
+  if (related.length > 0) {
+    return related.map((node, index) => {
+      const step = stepByTaskId.get(node.id);
+      return {
+        id: node.id,
+        label: node.id === task.reviewTaskId ? "Review" : unitLabel(node.id, index),
+        title: unitTitle(step?.text || node.request || node.id),
+        meta: unitMeta(node),
+        status: node.status || step?.status || "pending"
+      };
+    });
+  }
+  if (orderedIds.length > 0) {
+    return orderedIds.map((id, index) => {
+      const step = stepByTaskId.get(id);
+      return {
+        id,
+        label: id === task.reviewTaskId ? "Review" : unitLabel(id, index),
+        title: unitTitle(step?.text || id),
+        meta: "Waiting for task details",
+        status: step?.status || "pending"
+      };
+    });
+  }
+  const plan = task.workflow?.summary ? workflowPlanSummary(task, output.planSummary) : output.planSummary;
+  if (plan?.steps?.length > 0) {
+    return plan.steps.map((step, index) => ({
+      id: "plan-step-" + String(index + 1),
+      label: "Step " + String(index + 1),
+      title: unitTitle(step.text || ""),
+      meta: step.completed ? "Checklist item completed" : "Checklist item pending",
+      status: step.completed ? "completed" : task.status === "running" ? "running" : "pending"
+    }));
+  }
+  return [{
+    id: task.id,
+    label: "Task",
+    title: unitTitle(task.request || task.id),
+    meta: unitMeta(task),
+    status: task.status || "pending"
+  }];
+}
+
+function unitMeta(task) {
+  const agent = task.preferredAgent || task.profile || "";
+  const stage = (task.stages || []).join(" -> ");
+  const verification = task.verification?.status ? "verify " + task.verification.status : "";
+  const duration = task.runtime?.durationMs ? formatDuration(task.runtime.durationMs) : "";
+  return [agent, stage, verification, duration].filter(Boolean).join(" / ");
+}
+
+function renderTaskActionButtons(task, output) {
+  const summary = output.transcriptSummary;
+  const canCancel = state.capabilities.liveTaskManager && (task.status === "running" || task.status === "pending");
+  const canRetry = task.kind !== "workflow" && state.capabilities.liveTaskTools && ["failed", "interrupted", "cancelled"].includes(task.status);
+  const canRetryFailedParts = task.kind === "workflow" && state.capabilities.liveTaskManager && ["failed", "interrupted", "cancelled"].includes(task.status);
+  const canResume = canRetry && Boolean(task.agentSessionId || summary?.sessionId);
+  const canRollback = task.kind !== "workflow" && state.capabilities.liveTaskManager && task.rollback?.status === "ready";
+  if (!canCancel && !canRetry && !canResume && !canRetryFailedParts && !canRollback) return "";
+  return '<div class="actions">' +
+    (canCancel ? '<button class="danger-button" type="button" data-cancel-task="' + escapeAttr(task.id) + '">Cancel task</button>' : '') +
+    (canRetryFailedParts ? '<button class="secondary-button" type="button" data-retry-failed-parts="' + escapeAttr(task.id) + '">Retry failed parts</button>' : '') +
+    (canRetry ? '<button class="secondary-button" type="button" data-retry-task="' + escapeAttr(task.id) + '">Retry</button>' : '') +
+    (canResume ? '<button class="secondary-button" type="button" data-resume-task="' + escapeAttr(task.id) + '">Resume</button>' : '') +
+    (canRollback ? '<button class="danger-button" type="button" data-rollback-task="' + escapeAttr(task.id) + '">Rollback task</button>' : '') +
+    '</div>';
+}
+
+function unitLabel(id, index) {
+  const match = String(id || "").match(/part-(\\d+)$/);
+  return match ? "Plan " + match[1] : "Plan " + String(index + 1);
+}
+
+function unitTitle(text) {
+  const compact = compactText(text);
+  const assigned = compact.match(/Assigned subtask\\s+\\d+\\/\\d+\\s*:\\s*(.+?)(?:\\s+Plan file:|$)/i);
+  if (assigned) return cleanUnitTitle(truncateText(assigned[1], 180));
+  if (/^Review the completed/i.test(compact)) return "Review implementation results";
+  if (/^Execute only the assigned subtask/i.test(compact)) return cleanUnitTitle(truncateText(compact.replace(/^Execute only the assigned subtask from the implementation plan below\\.\\s*/i, ""), 180));
+  return cleanUnitTitle(truncateText(compact, 180));
+}
+
+function compactText(text) {
+  return String(text || "").replace(/\\s+/g, " ").trim();
+}
+
+function cleanUnitTitle(text) {
+  const tick = String.fromCharCode(96);
+  return String(text || "").replace(/\\*\\*/g, "").split(tick).join("").trim();
+}
+
+function truncateText(text, maxLength) {
+  const compact = compactText(text);
+  return compact.length > maxLength ? compact.slice(0, maxLength - 1) + "..." : compact;
+}
+
+function renderResultSummaryPanel(task) {
+  const result = task.resultSummary;
+  if (!result) return "";
+  const sessions = result.agentSessions || [];
+  return \`
+    <div class="panel section result-summary-panel">
+      <div class="panel-head">
+        <h3>Result summary</h3>
+        <span class="status \${escapeAttr(result.status || task.status)}">\${escapeHtml(displayTaskStatus({ ...task, status: result.status || task.status }))}</span>
+      </div>
+      <p class="result-lede">\${escapeHtml(result.summary || "No result summary is available yet.")}</p>
+      <div class="result-grid">
+        \${kv("Provider", result.provider || task.preferredAgent || "")}
+        \${kv("Provider attempts", (result.providerAttempts || []).join(" -> "))}
+        \${kv("Quality", result.quality ? result.quality.status + " (" + result.quality.score + ")" : "")}
+        \${kv("Failure category", result.failure?.category || "")}
+        \${kv("Duration", result.durationMs !== undefined ? formatDuration(result.durationMs) : "")}
+        \${kv("Verification", result.verification ? result.verification.status + (result.verification.exitCode !== undefined ? " (" + result.verification.exitCode + ")" : "") : "")}
+        \${kv("Repaired by", result.verification?.repairedBy || task.verification?.repairTaskId || "")}
+        \${kv("Sessions", sessions.map(session => session.agent + ": " + session.sessionId).join(", "))}
+      </div>
+      \${renderQualityPanel(result)}
+      <div class="result-block">
+        <h3>Changed files</h3>
+        <div class="pill-line">\${(result.changedFiles || []).map(file => '<span class="pill">' + escapeHtml(file) + '</span>').join("") || '<span class="meta">No changed files recorded.</span>'}</div>
+      </div>
+      <div class="result-block">
+        <h3>Next steps</h3>
+        \${(result.nextSteps || []).length > 0 ? '<ul class="finding-list">' + result.nextSteps.map(step => '<li>' + escapeHtml(step) + '</li>').join("") + '</ul>' : '<span class="meta">No next steps recorded.</span>'}
+      </div>
+      \${renderGuardrailsPanel(result.guardrails || task.guardrails || [])}
+    </div>
+  \`;
+}
+
+function renderQualityPanel(result) {
+  if (!result.quality && !result.failure) return "";
+  return \`
+    <div class="result-block">
+      <h3>Quality assessment</h3>
+      \${result.quality ? '<ul class="finding-list">' + (result.quality.reasons || []).map(reason => '<li>' + escapeHtml(reason) + '</li>').join("") + '</ul>' : ''}
+      \${result.failure ? \`
+        <div class="guardrail-item error">
+          <strong>\${escapeHtml(result.failure.category || "failure")}</strong>
+          <span>\${escapeHtml(result.failure.message || "")}</span>
+          <span class="meta">Suggested action: \${escapeHtml(result.failure.nextAction || "")}</span>
+        </div>
+      \` : ''}
+    </div>
+  \`;
+}
+
+function renderGuardrailsPanel(guardrails) {
+  if (!guardrails || guardrails.length === 0) return "";
+  return \`
+    <div class="result-block">
+      <h3>Guardrails</h3>
+      <div class="guardrail-list">\${guardrails.map(issue => \`
+        <div class="guardrail-item \${escapeAttr(issue.severity || "warning")}">
+          <strong>\${escapeHtml(issue.kind || "guardrail")} / \${escapeHtml(issue.severity || "warning")}</strong>
+          <span>\${escapeHtml(issue.message || "")}</span>
+          \${issue.file ? '<span class="meta">File: ' + escapeHtml(issue.file) + '</span>' : ''}
+          \${issue.evidence ? '<span class="meta">Evidence: ' + escapeHtml(issue.evidence) + '</span>' : ''}
+        </div>
+      \`).join("")}</div>
+    </div>
+  \`;
+}
+
+function renderRuntimePanel(task) {
+  const runtime = task.runtime;
+  if (!runtime) return "";
+  const outputFiles = runtime.outputFiles || [];
+  const liveChangedFiles = runtime.liveChangedFiles || [];
+  return \`
+    <div class="panel section runtime-panel">
+      <div class="panel-head">
+        <h3>Runtime</h3>
+        \${task.status === "running" || task.status === "pending" ? '<span class="status running">live</span>' : '<span class="meta">snapshot</span>'}
+      </div>
+      <div class="result-grid">
+        \${kv("Duration", formatDuration(runtime.durationMs))}
+        \${kv("Output bytes", formatBytes(runtime.outputBytes || 0))}
+        \${kv("Last output", runtime.lastOutputAt ? formatTime(runtime.lastOutputAt) : "")}
+        \${kv("Output files", String(outputFiles.length))}
+      </div>
+      <div class="result-block">
+        <h3>Live changed files</h3>
+        <div class="pill-line">\${liveChangedFiles.map(file => '<span class="pill">' + escapeHtml(file) + '</span>').join("") || '<span class="meta">No live git changes detected.</span>'}</div>
+      </div>
+      <div class="result-block">
+        <h3>Output files</h3>
+        <div class="runtime-file-list">\${outputFiles.map(file => '<div class="runtime-file"><span>' + escapeHtml(shortPath(file.path)) + '</span><span class="meta">' + escapeHtml(formatBytes(file.bytes)) + (file.modifiedAt ? ' / ' + escapeHtml(formatTime(file.modifiedAt)) : '') + '</span></div>').join("") || '<span class="meta">No output files have been written yet.</span>'}</div>
+      </div>
     </div>
   \`;
 }
@@ -1257,6 +2019,7 @@ function renderVerificationPanel(task) {
       \${kv("Timed out", verification.timedOut ? "true" : "")}
       \${kv("Started", verification.startedAt || "")}
       \${kv("Finished", verification.finishedAt || "")}
+      \${kv("Sandbox", verification.tmpDir || "")}
       \${kv("Repair task", verification.repairTaskId || "")}
       \${output ? '<pre>' + escapeHtml(output) + '</pre>' : '<span class="meta">No verification output available.</span>'}
     </div>
@@ -1264,12 +2027,13 @@ function renderVerificationPanel(task) {
 }
 
 function renderOutcomePanel(task, output) {
+  const deliveryReport = output.deliveryReport;
   const report = finalReportArtifact(output);
   const stageSummary = stageResults(task).map(result => result.summary).filter(Boolean).join("\\n\\n");
-  const content = report?.content || stageSummary || task.error || "";
+  const content = deliveryReport?.markdown || report?.content || stageSummary || task.error || "";
   return \`
     <div class="panel section outcome-panel">
-      <div class="panel-head"><h3>Final report</h3>\${report ? '<span class="meta">' + escapeHtml(report.path) + '</span>' : ''}</div>
+      <div class="panel-head"><h3>Final report</h3>\${deliveryReport ? '<span class="meta">' + escapeHtml(deliveryReport.statusLabel || "delivery") + '</span>' : report ? '<span class="meta">' + escapeHtml(report.path) + '</span>' : ''}</div>
       <pre>\${escapeHtml(content || "No final report is available yet.")}</pre>
     </div>
   \`;
@@ -1443,6 +2207,40 @@ function selectIoTab(tabId) {
 
 function kv(label, value) {
   return '<div class="kv"><span>' + escapeHtml(label) + '</span><span>' + escapeHtml(value || "-") + '</span></div>';
+}
+
+function formatDuration(ms) {
+  const value = Number(ms || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0s";
+  const seconds = Math.floor(value / 1000);
+  if (seconds < 60) return String(seconds) + "s";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return String(minutes) + "m " + String(seconds % 60) + "s";
+  const hours = Math.floor(minutes / 60);
+  return String(hours) + "h " + String(minutes % 60) + "m";
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return String(value) + " B";
+  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+  return (value / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function formatTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
+}
+
+function shortPath(path) {
+  const text = String(path || "");
+  const marker = "/.agent-runs/";
+  const index = text.indexOf(marker);
+  if (index >= 0) return text.slice(index + 1);
+  const parts = text.split("/");
+  return parts.length > 4 ? parts.slice(-4).join("/") : text;
 }
 
 function workflowSummary(summary) {

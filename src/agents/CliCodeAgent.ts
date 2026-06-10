@@ -36,11 +36,16 @@ export interface OpenCodeAgentOptions extends CliAgentOptions {
   opencodePath?: string;
 }
 
+export interface MyFlickerAgentOptions extends CliAgentOptions {
+  myflickerPath?: string;
+}
+
 interface CliSpec {
   name: AgentName;
   commandPath: string;
   logPrefix: string;
   buildArgs(input: StageInput, prompt: string): { args: string[]; input?: string };
+  buildResumeCommand?: (commandPath: string, sessionId: string) => string;
 }
 
 export class CodexCliAgent implements AgentProvider {
@@ -141,6 +146,45 @@ export class OpenCodeAgent implements AgentProvider {
   }
 }
 
+export class MyFlickerAgent implements AgentProvider {
+  readonly name = "myflicker" as const;
+  private readonly delegate: CliCodeAgent;
+
+  constructor(options: MyFlickerAgentOptions = {}) {
+    this.delegate = new CliCodeAgent({
+      name: this.name,
+      commandPath: options.myflickerPath ?? "m",
+      logPrefix: "myflicker",
+      exec: options.exec,
+      getChangedFiles: options.getChangedFiles,
+      buildArgs: (input, prompt) => {
+        const args = [
+          "-q",
+          "--cwd",
+          input.workspace,
+          "--output-format",
+          "stream-json"
+        ];
+        if (input.stage === "implement") {
+          args.push("--approval-mode", "yolo");
+        } else {
+          args.push("--tools", JSON.stringify(readOnlyMyFlickerTools()));
+        }
+        if (input.agentSessionId) args.push("--resume", input.agentSessionId);
+        if (input.model) args.push("--model", input.model);
+        if (input.effort) args.push("--thinking-level", input.effort);
+        args.push(prompt);
+        return { args, input: "" };
+      },
+      buildResumeCommand: (commandPath, sessionId) => `${shellQuote(commandPath)} --resume ${shellQuote(sessionId)}`
+    });
+  }
+
+  run(input: StageInput): Promise<StageResult> {
+    return this.delegate.run(input);
+  }
+}
+
 class CliCodeAgent implements AgentProvider {
   readonly name: AgentName;
   private readonly commandPath: string;
@@ -148,6 +192,7 @@ class CliCodeAgent implements AgentProvider {
   private readonly exec: ExecFn;
   private readonly getChangedFiles: (workspace: string) => Promise<string[]>;
   private readonly buildArgs: CliSpec["buildArgs"];
+  private readonly buildResumeCommand?: CliSpec["buildResumeCommand"];
 
   constructor(options: CliSpec & CliAgentOptions) {
     this.name = options.name;
@@ -156,6 +201,7 @@ class CliCodeAgent implements AgentProvider {
     this.exec = options.exec ?? execFileCapture;
     this.getChangedFiles = options.getChangedFiles ?? changedFiles;
     this.buildArgs = options.buildArgs;
+    this.buildResumeCommand = options.buildResumeCommand;
   }
 
   async run(input: StageInput): Promise<StageResult> {
@@ -178,6 +224,10 @@ class CliCodeAgent implements AgentProvider {
     if (result.stderr) appendMissingContent(stderrPath, result.stderr);
 
     const outputText = extractCliOutput(result.stdout);
+    const agentSessionId = extractCliSessionId(result.stdout) ?? input.agentSessionId;
+    const resumeCommand = agentSessionId && this.buildResumeCommand
+      ? this.buildResumeCommand(this.commandPath, agentSessionId)
+      : undefined;
     const outputPath = await store.writeStageOutput(runId, input.stage, outputText);
     const files = await this.getChangedFiles(input.workspace);
 
@@ -190,6 +240,8 @@ class CliCodeAgent implements AgentProvider {
         status: "failed",
         outputPath,
         logPath: stderrPath,
+        agentSessionId,
+        resumeCommand,
         changedFiles: files,
         requiresCodex: false,
         summary: `${this.name} ${input.stage} failed`,
@@ -205,6 +257,8 @@ class CliCodeAgent implements AgentProvider {
       status: "completed",
       outputPath,
       logPath: stdoutPath,
+      agentSessionId,
+      resumeCommand,
       changedFiles: files,
       requiresCodex: false,
       summary: `${this.name} ${input.stage} completed`
@@ -232,6 +286,54 @@ function extractStreamResult(stdout: string): string | undefined {
     }
   }
   return chunks.length > 0 ? chunks.join("") : undefined;
+}
+
+function extractCliSessionId(stdout: string): string | undefined {
+  for (const line of stdout.trim().split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const direct = firstString(
+        parsed.sessionId,
+        parsed.session_id,
+        parsed.sessionID,
+        parsed.conversationId,
+        parsed.conversation_id
+      );
+      if (direct) return direct;
+      const message = parsed.message;
+      if (isRecord(message)) {
+        const nested = firstString(message.sessionId, message.session_id, message.conversationId, message.conversation_id);
+        if (nested) return nested;
+      }
+    } catch {
+      // Ignore non-JSON stream lines.
+    }
+  }
+  return undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function readOnlyMyFlickerTools(): Record<string, boolean> {
+  return {
+    write: false,
+    edit: false,
+    bash: false,
+    docs_write: false,
+    docs_edit: false,
+    todoWrite: false
+  };
 }
 
 function appendMissingContent(path: string, content: string): void {

@@ -19,6 +19,14 @@ describe("buildWorkspaceContext", () => {
         zod: "^4.0.0"
       }
     }), "utf8");
+    await mkdir(join(workspace, ".codex-claude", "memory"), { recursive: true });
+    await writeFile(join(workspace, ".codex-claude", "memory", "project-memory.md"), [
+      "# Project memory",
+      "",
+      "- 2026-06-04 memory-task: completed",
+      "  Request: Add remembered feature",
+      "  Summary: Previous agent learned this workspace uses service objects."
+    ].join("\n"), "utf8");
     await writeFile(join(workspace, "src", "user.ts"), [
       "export class UserService {",
       "  getUserProfile(): string {",
@@ -38,6 +46,8 @@ describe("buildWorkspaceContext", () => {
     assert.match(context, /Demo App/);
     assert.match(context, /package\.json/);
     assert.match(context, /demo-app/);
+    assert.match(context, /Project memory/);
+    assert.match(context, /Previous agent learned/);
     assert.match(context, /typescript: 1/);
     assert.match(context, /src\/user\.ts/);
     assert.match(context, /UserService/);

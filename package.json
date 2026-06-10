@@ -26,7 +26,10 @@
     "prepare": "npm run build",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "release:check": "npm run typecheck && npm test && node dist/src/releaseCheckCli.js",
+    "install:smoke": "npm run build && node dist/src/installSmokeCli.js",
     "bridge": "npm run build && node dist/src/cli.js",
+    "doctor": "npm run build && node dist/src/cli.js doctor",
     "mcp": "npm run build && node dist/src/mcpServer.js",
     "dashboard": "npm run build && node dist/src/dashboardCli.js",
     "mcp-dashboard": "npm run build && node dist/src/mcpDashboardServer.js"

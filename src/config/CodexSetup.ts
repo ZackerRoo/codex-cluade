@@ -12,6 +12,7 @@ export interface CodexMcpConfigOptions {
   codexPath?: string;
   geminiPath?: string;
   opencodePath?: string;
+  myflickerPath?: string;
 }
 
 export interface SetupCodexMcpConfigOptions extends CodexMcpConfigOptions {
@@ -37,7 +38,8 @@ export function buildCodexMcpConfig(options: CodexMcpConfigOptions): string {
     ["CLAUDE_CODE_PATH", options.claudePath ?? "claude"],
     ["CODEX_CLI_PATH", options.codexPath ?? "codex"],
     ["GEMINI_CLI_PATH", options.geminiPath ?? "gemini"],
-    ["OPENCODE_CLI_PATH", options.opencodePath ?? "opencode"]
+    ["OPENCODE_CLI_PATH", options.opencodePath ?? "opencode"],
+    ["MYFLICKER_CLI_PATH", options.myflickerPath ?? "m"]
   ];
 
   return [

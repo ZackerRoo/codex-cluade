@@ -15,8 +15,10 @@ describe("loadBridgeConfig", () => {
       codexPath: "/tmp/codex",
       geminiPath: "/tmp/gemini",
       opencodePath: "/tmp/opencode",
+      myflickerPath: "/tmp/m",
       defaults: { timeoutMs: 123, claudeModel: "pa/claude-opus-4-7" },
       concurrency: { maxRunning: 2 },
+      workflow: { maxRunning: 3, maxImplementationTasks: 6 },
       profiles: {
         coder2: {
           description: "Custom coder",
@@ -32,9 +34,12 @@ describe("loadBridgeConfig", () => {
     assert.equal(config.codexPath, "/tmp/codex");
     assert.equal(config.geminiPath, "/tmp/gemini");
     assert.equal(config.opencodePath, "/tmp/opencode");
+    assert.equal(config.myflickerPath, "/tmp/m");
     assert.equal(config.defaults?.timeoutMs, 123);
     assert.equal(config.defaults?.claudeModel, "pa/claude-opus-4-7");
     assert.equal(config.concurrency?.maxRunning, 2);
+    assert.equal(config.workflow?.maxRunning, 3);
+    assert.equal(config.workflow?.maxImplementationTasks, 6);
     assert.equal(config.profiles?.coder2?.agent, "claude");
   });
 });

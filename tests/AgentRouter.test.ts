@@ -43,6 +43,7 @@ describe("AgentRouter", () => {
 
     assert.equal(router.resolveRoute("implement", {}, { profile: "codex-coder" }).agent, "codex-cli");
     assert.equal(router.resolveRoute("implement", {}, { profile: "gemini-coder" }).agent, "gemini");
+    assert.equal(router.resolveRoute("implement", {}, { profile: "myflicker-coder" }).agent, "myflicker");
   });
 
   it("routes dedicated agent team profiles with role prompts", () => {

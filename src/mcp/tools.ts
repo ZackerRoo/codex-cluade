@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ClaudeCodeAgentOptions } from "../agents/ClaudeCodeAgent.js";
 import { AgentRegistry } from "../agents/AgentRegistry.js";
 import { ClaudeCodeAgent } from "../agents/ClaudeCodeAgent.js";
-import { CodexCliAgent, GeminiCliAgent, OpenCodeAgent } from "../agents/CliCodeAgent.js";
+import { CodexCliAgent, GeminiCliAgent, MyFlickerAgent, OpenCodeAgent } from "../agents/CliCodeAgent.js";
 import { CodexAgent } from "../agents/CodexAgent.js";
 import {
   inspectCodeDefinition,
@@ -21,10 +22,14 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import { ProviderDoctor } from "../doctor/ProviderDoctor.js";
-import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode } from "../types.js";
+import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode, TaskPreview } from "../types.js";
+import { createGitCheckpoint } from "../utils/git.js";
+import { buildWebVerifyCommand } from "../verification/WebAppVerifier.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
 import { createPlanId, PlanStore, type PlanRecord } from "../workflow/PlanStore.js";
+import { ProjectMemoryStore, renderProjectMemoryMarkdown } from "../workflow/ProjectMemory.js";
 import { TaskManager } from "../workflow/TaskManager.js";
+import { buildTaskPreview } from "../workflow/TaskPreview.js";
 import type { TaskStore } from "../workflow/TaskStore.js";
 import { readBackgroundOutput } from "./backgroundOutput.js";
 
@@ -124,6 +129,10 @@ export interface TaskLookupArgs {
   cursor?: number;
 }
 
+export interface ProjectMemoryArgs {
+  workspace: string;
+}
+
 export interface RunCommandArgs {
   command: string;
   workspace: string;
@@ -143,9 +152,22 @@ export interface RunCommandArgs {
   maxRepairAttempts?: number;
 }
 
+export interface TaskPreviewArgs {
+  command?: string;
+  workspace: string;
+  request?: string;
+  mode?: TaskMode;
+  strategy?: AutoDispatchStrategy;
+  stage?: Stage;
+  profile?: AgentProfileName;
+  preferredAgent?: AgentName;
+  verifyCommand?: string;
+}
+
 export interface TaskToolSet {
   providerDoctorTool(): Promise<CallToolResult>;
   commandCatalogTool(): Promise<CallToolResult>;
+  taskPreviewTool(args: TaskPreviewArgs): Promise<CallToolResult>;
   runCommandTool(args: RunCommandArgs): Promise<CallToolResult>;
   autoDispatchTool(args: AutoDispatchArgs): Promise<CallToolResult>;
   delegateTaskTool(args: DelegateTaskArgs): Promise<CallToolResult>;
@@ -155,7 +177,9 @@ export interface TaskToolSet {
   taskCancelTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskRetryTool(args: TaskLookupArgs): Promise<CallToolResult>;
   taskResumeTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  taskRollbackTool(args: TaskLookupArgs): Promise<CallToolResult>;
   backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
+  projectMemoryTool(args: ProjectMemoryArgs): Promise<CallToolResult>;
   taskListTool(): Promise<CallToolResult>;
   agentCatalogTool(): Promise<CallToolResult>;
   codeSymbolsTool(args: CodeSymbolsArgs): Promise<CallToolResult>;
@@ -235,6 +259,20 @@ export function createTaskTools(options: {
         content: [{ type: "text", text: formatCommandCatalog(commands) }],
         structuredContent: { ok: true, commands }
       };
+    },
+
+    async taskPreviewTool(args: TaskPreviewArgs): Promise<CallToolResult> {
+      const validationError = validateTaskPreviewArgs(args);
+      if (validationError) return errorResult(validationError);
+      try {
+        const preview = await runTaskPreview(args, config);
+        return {
+          content: [{ type: "text", text: formatTaskPreview(preview) }],
+          structuredContent: { ok: true, preview }
+        };
+      } catch (error) {
+        return errorResult(error instanceof Error ? error.message : String(error));
+      }
     },
 
     async runCommandTool(args: RunCommandArgs): Promise<CallToolResult> {
@@ -537,6 +575,17 @@ export function createTaskTools(options: {
       };
     },
 
+    async taskRollbackTool(args: TaskLookupArgs): Promise<CallToolResult> {
+      if (!args.taskId) return errorResult("taskId is required");
+      const task = await manager.rollback(args.taskId);
+      if (!task) return errorResult(`Task not found or cannot be rolled back: ${args.taskId}`);
+      return {
+        content: [{ type: "text", text: formatTask(task) }],
+        structuredContent: { ok: task.rollback?.status !== "failed", ...task },
+        isError: task.rollback?.status === "failed" ? true : undefined
+      };
+    },
+
     async backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult> {
       if (!args.taskId) return errorResult("taskId is required");
       const task = manager.get(args.taskId);
@@ -545,6 +594,23 @@ export function createTaskTools(options: {
       return {
         content: [{ type: "text", text: formatBackgroundOutput(output) }],
         structuredContent: { ok: true, ...output }
+      };
+    },
+
+    async projectMemoryTool(args: ProjectMemoryArgs): Promise<CallToolResult> {
+      if (!args.workspace) return errorResult("workspace is required");
+      const store = new ProjectMemoryStore(args.workspace);
+      const memory = await store.read();
+      const markdown = renderProjectMemoryMarkdown(memory);
+      return {
+        content: [{ type: "text", text: markdown }],
+        structuredContent: {
+          ok: true,
+          ...memory,
+          jsonPath: store.jsonPath,
+          markdownPath: store.markdownPath,
+          markdown
+        }
       };
     },
 
@@ -643,10 +709,16 @@ export function createTaskManager(options: {
       opencode: new OpenCodeAgent({
         opencodePath: process.env.OPENCODE_CLI_PATH ?? config.opencodePath
       }),
+      myflicker: new MyFlickerAgent({
+        myflickerPath: process.env.MYFLICKER_CLI_PATH ?? config.myflickerPath
+      }),
       codex: new CodexAgent()
     }
   });
-  return new TaskManager(coordinator, options.taskStore, { concurrency: config.concurrency });
+  return new TaskManager(coordinator, options.taskStore, {
+    concurrency: config.concurrency,
+    workflow: config.workflow
+  });
 }
 
 async function runAutoDispatch(args: AutoDispatchArgs, config: BridgeConfig, manager: TaskManager): Promise<CallToolResult> {
@@ -741,6 +813,28 @@ async function runAutoDispatch(args: AutoDispatchArgs, config: BridgeConfig, man
   }
 }
 
+async function runTaskPreview(args: TaskPreviewArgs, config: BridgeConfig): Promise<TaskPreview> {
+  const [workspaceExists, doctor, git] = await Promise.all([
+    pathExists(args.workspace),
+    new ProviderDoctor({ config, cwd: args.workspace }).check().catch(() => undefined),
+    createGitCheckpoint(args.workspace).catch(() => undefined)
+  ]);
+  return buildTaskPreview({
+    workspace: args.workspace,
+    request: args.request,
+    command: args.command,
+    mode: args.mode,
+    strategy: args.strategy,
+    stage: args.stage,
+    profile: args.profile,
+    preferredAgent: args.preferredAgent,
+    verifyCommand: args.verifyCommand,
+    workspaceExists,
+    providerChecks: doctor?.checks,
+    git
+  });
+}
+
 async function runCreatePlan(args: CreatePlanArgs, config: BridgeConfig, manager: TaskManager): Promise<CallToolResult> {
   const skills = await resolveSkills(args.loadSkills, config);
   const planId = args.planId ?? createPlanId();
@@ -781,6 +875,11 @@ async function runUltraworkCommand(
   config: BridgeConfig,
   manager: TaskManager
 ): Promise<CallToolResult> {
+  const verifyCommand = args.verifyCommand ?? buildWebVerifyCommand({
+    workspace: args.workspace,
+    request: args.request,
+    cliPath: fileURLToPath(new URL("../cli.js", import.meta.url))
+  });
   const planId = args.planId ?? createPlanId();
   const planResult = await runCreatePlan({
     workspace: args.workspace,
@@ -796,7 +895,8 @@ async function runUltraworkCommand(
   if (planResult.isError || planResult.structuredContent?.ok !== true) return planResult;
   const planPath = String(planResult.structuredContent.planPath ?? "");
   const plan = await new PlanStore(args.workspace).read({ planId, planPath });
-  const subtasks = extractPlanSubtasks(plan.content);
+  const maxImplementationTasks = config.workflow?.maxImplementationTasks ?? 6;
+  const subtasks = extractPlanSubtasks(plan.content, maxImplementationTasks);
   const skills = await resolveSkills(args.loadSkills, config);
   const parentTaskId = args.runId ?? `ultrawork-${plan.planId}`;
   const childTaskIds: string[] = [];
@@ -850,7 +950,7 @@ async function runUltraworkCommand(
     planPath,
     childTaskIds,
     reviewTaskId,
-    verifyCommand: args.verifyCommand,
+    verifyCommand,
     maxRepairAttempts: args.maxRepairAttempts
   });
   return {
@@ -860,6 +960,8 @@ async function runUltraworkCommand(
         "Ultrawork launched",
         `planId: ${planId}`,
         `planPath: ${planPath}`,
+        `Implementation batches: ${subtasks.length}`,
+        `Workflow concurrency: ${config.workflow?.maxRunning ?? 3}`,
         `Task: ${workflowTask.id}`,
         `Review task: ${reviewTaskId}`,
         `Child tasks: ${childTaskIds.join(", ")}`
@@ -875,7 +977,11 @@ async function runUltraworkCommand(
       taskId: workflowTask.id,
       task: workflowTask,
       childTaskIds,
-      reviewTaskId
+      reviewTaskId,
+      workflowOptions: {
+        maxImplementationTasks,
+        maxRunning: config.workflow?.maxRunning ?? 3
+      }
     }
   };
 }
@@ -946,6 +1052,21 @@ function validateRunCommandArgs(args: RunCommandArgs): string | undefined {
   const verificationError = validateVerificationArgs(args);
   if (verificationError) return verificationError;
   if (args.agentSessionId !== undefined && !isUuid(args.agentSessionId)) return "agentSessionId must be a Claude session UUID";
+  return undefined;
+}
+
+function validateTaskPreviewArgs(args: TaskPreviewArgs): string | undefined {
+  if (!args.workspace) return "workspace is required";
+  if (args.strategy !== undefined && args.strategy !== "auto" && args.strategy !== "direct" && args.strategy !== "plan") {
+    return `invalid strategy: ${String(args.strategy)}`;
+  }
+  if (args.mode !== undefined && args.mode !== "sync" && args.mode !== "background") {
+    return `invalid mode: ${String(args.mode)}`;
+  }
+  if (args.stage !== undefined && !isStage(args.stage)) return `invalid stage: ${String(args.stage)}`;
+  if (args.preferredAgent !== undefined && !isAgent(args.preferredAgent)) {
+    return `invalid preferredAgent: ${String(args.preferredAgent)}`;
+  }
   return undefined;
 }
 
@@ -1068,7 +1189,7 @@ function isStage(value: unknown): value is Stage {
 }
 
 function isAgent(value: unknown): value is AgentName {
-  return value === "claude" || value === "codex" || value === "codex-cli" || value === "gemini" || value === "opencode";
+  return value === "claude" || value === "codex" || value === "codex-cli" || value === "gemini" || value === "opencode" || value === "myflicker";
 }
 
 function buildPlannerRequest(request: string): string {
@@ -1095,9 +1216,10 @@ function buildExecutorRequest(plan: PlanRecord, request?: string): string {
 
 function buildSubtaskExecutorRequest(plan: PlanRecord, subtask: string, index: number, total: number, request?: string): string {
   return [
-    "Execute only the assigned subtask from the implementation plan below. Keep changes scoped to this subtask and compatible with sibling subtasks. Do not commit.",
+    "Execute only the assigned implementation batch from the implementation plan below. Keep changes scoped to this batch and compatible with sibling batches. Do not commit.",
     request ? `Original request: ${request}` : undefined,
-    `Assigned subtask ${index}/${total}: ${subtask}`,
+    `Assigned implementation batch ${index}/${total}:`,
+    subtask,
     "",
     `Plan file: ${plan.planPath}`,
     "",
@@ -1108,7 +1230,12 @@ function buildSubtaskExecutorRequest(plan: PlanRecord, subtask: string, index: n
 function buildWorkflowReviewRequest(plan: PlanRecord, implementTaskIds: string[], request?: string): string {
   return [
     "Review the completed ultrawork implementation tasks against the original request and plan.",
-    "Return findings first. Focus on correctness bugs, missing requirements, integration conflicts between child tasks, and missing verification.",
+    "Be quick and selective: first inspect verification status, changed files, and the highest-risk integration points.",
+    "Do not re-read every child log unless needed. Do not modify files.",
+    "Return sections in this order: Findings, Verification, Shared-file risks, Repair recommendation, Residual risk.",
+    "Findings must come first and focus on correctness bugs, missing requirements, integration conflicts between child tasks, and missing verification.",
+    "If verification failed, is missing, or only passed after repair, call that out explicitly and say whether the result is safe to trust.",
+    "Inspect files touched by multiple child tasks first because those are the most likely integration conflict points.",
     request ? `Original request: ${request}` : undefined,
     "",
     `Plan file: ${plan.planPath}`,
@@ -1118,12 +1245,24 @@ function buildWorkflowReviewRequest(plan: PlanRecord, implementTaskIds: string[]
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 
-function extractPlanSubtasks(content: string): string[] {
+function extractPlanSubtasks(content: string, maxImplementationTasks = 6): string[] {
   const tasks = content
     .split(/\r?\n/)
     .map(line => line.match(/^\s*[-*]\s+\[[ xX]\]\s+(.+?)\s*$/)?.[1]?.trim())
     .filter((task): task is string => Boolean(task));
-  return tasks.length > 0 ? tasks : ["Execute the implementation plan"];
+  if (tasks.length === 0) return ["Execute the implementation plan"];
+  const limit = Math.max(1, Math.floor(maxImplementationTasks));
+  if (tasks.length <= limit) return tasks;
+  const batchSize = Math.ceil(tasks.length / limit);
+  const batches: string[] = [];
+  for (let start = 0; start < tasks.length; start += batchSize) {
+    const batch = tasks.slice(start, start + batchSize);
+    batches.push([
+      `Plan steps ${start + 1}-${start + batch.length}:`,
+      ...batch.map(task => `- ${task}`)
+    ].join("\n"));
+  }
+  return batches;
 }
 
 function normalizePlanContent(planId: string, request: string, content: string): string {
@@ -1242,6 +1381,29 @@ function formatCommandCatalog(commands: CommandDefinition[]): string {
   ].join("\n");
 }
 
+function formatTaskPreview(preview: TaskPreview): string {
+  return [
+    "Task preview",
+    `Strategy: ${preview.strategy}`,
+    `Risk: ${preview.risk.level} (${preview.risk.score})`,
+    `Will modify files: ${preview.willModifyFiles ? "yes" : "no"}`,
+    preview.verification.configured ? `Verification: ${preview.verification.command}` : "Verification: not configured",
+    "Execution:",
+    ...preview.executionPlan.map(step => `- ${step.role}: ${step.stage}${step.profile ? ` / ${step.profile}` : ""}${step.provider ? ` / ${step.provider}` : ""}${step.count ? ` x${step.count}` : ""}`),
+    preview.warnings.length > 0 ? "Warnings:" : undefined,
+    ...preview.warnings.map(warning => `- ${warning.severity}:${warning.code} - ${warning.message}`),
+    `Recommended action: ${preview.recommendedAction}`,
+    preview.recommendedSetup ? "Recommended setup:" : undefined,
+    preview.recommendedSetup?.tab ? `- tab: ${preview.recommendedSetup.tab}` : undefined,
+    preview.recommendedSetup?.command ? `- command: ${preview.recommendedSetup.command}` : undefined,
+    preview.recommendedSetup?.mode ? `- mode: ${preview.recommendedSetup.mode}` : undefined,
+    preview.recommendedSetup?.strategy ? `- strategy: ${preview.recommendedSetup.strategy}` : undefined,
+    preview.recommendedSetup?.preferredAgent !== undefined ? `- preferredAgent: ${preview.recommendedSetup.preferredAgent || "Auto"}` : undefined,
+    preview.recommendedSetup?.requiresConfirmation ? "- requires confirmation: true" : undefined,
+    ...(preview.recommendedSetup?.notes ?? []).map(note => `- note: ${note}`)
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 function decorateCommandResult(result: CallToolResult, command: string): CallToolResult {
   return {
     ...result,
@@ -1265,6 +1427,10 @@ function formatTask(task: {
   retryOf?: string;
   resumeOf?: string;
   repairOf?: string;
+  continuationOf?: string;
+  continuationTaskId?: string;
+  maxContinuationAttempts?: number;
+  continuationAttempt?: number;
   verifyCommand?: string;
   verification?: {
     command: string;
@@ -1272,6 +1438,38 @@ function formatTask(task: {
     exitCode?: number | null;
     timedOut?: boolean;
     repairTaskId?: string;
+    error?: string;
+  };
+  resultSummary?: {
+    summary?: string;
+    quality?: {
+      status: string;
+      score: number;
+      reasons: string[];
+    };
+    failure?: {
+      category: string;
+      message: string;
+      nextAction: string;
+    };
+    changedFiles?: string[];
+    nextSteps?: string[];
+    guardrails?: Array<{ kind: string; severity: string; message: string; file?: string }>;
+  };
+  guardrails?: Array<{ kind: string; severity: string; message: string; file?: string }>;
+  gitCheckpoint?: {
+    supported: boolean;
+    clean: boolean;
+    head?: string;
+    error?: string;
+  };
+  gitDiff?: {
+    supported: boolean;
+    files: Array<{ path: string; status: string }>;
+    error?: string;
+  };
+  rollback?: {
+    status: string;
     error?: string;
   };
   maxRepairAttempts?: number;
@@ -1291,14 +1489,32 @@ function formatTask(task: {
     task.retryOf ? `Retry of: ${task.retryOf}` : undefined,
     task.resumeOf ? `Resume of: ${task.resumeOf}` : undefined,
     task.repairOf ? `Repair of: ${task.repairOf}` : undefined,
+    task.continuationOf ? `Continuation of: ${task.continuationOf}` : undefined,
+    task.continuationTaskId ? `Continuation task: ${task.continuationTaskId}` : undefined,
     task.verifyCommand ? `Verify command: ${task.verifyCommand}` : undefined,
     task.verification ? `Verification: ${task.verification.status}` : undefined,
     task.verification?.exitCode !== undefined ? `Verification exit: ${String(task.verification.exitCode)}` : undefined,
     task.verification?.timedOut ? "Verification timed out: true" : undefined,
     task.verification?.repairTaskId ? `Repair task: ${task.verification.repairTaskId}` : undefined,
     task.verification?.error ? `Verification error: ${task.verification.error}` : undefined,
+    task.resultSummary?.summary ? `Result summary: ${task.resultSummary.summary}` : undefined,
+    task.resultSummary?.quality ? `Quality: ${task.resultSummary.quality.status} (${task.resultSummary.quality.score})` : undefined,
+    task.resultSummary?.quality?.reasons?.length ? `Quality reasons: ${task.resultSummary.quality.reasons.join(" | ")}` : undefined,
+    task.resultSummary?.failure ? `Failure category: ${task.resultSummary.failure.category}` : undefined,
+    task.resultSummary?.failure?.message ? `Failure message: ${task.resultSummary.failure.message}` : undefined,
+    task.resultSummary?.failure?.nextAction ? `Suggested action: ${task.resultSummary.failure.nextAction}` : undefined,
+    formatGuardrails(task.resultSummary?.guardrails ?? task.guardrails),
+    task.resultSummary?.changedFiles && task.resultSummary.changedFiles.length > 0 ? `Changed files: ${task.resultSummary.changedFiles.join(", ")}` : undefined,
+    task.resultSummary?.nextSteps && task.resultSummary.nextSteps.length > 0 ? `Next steps: ${task.resultSummary.nextSteps.join(" | ")}` : undefined,
+    task.gitCheckpoint ? `Git checkpoint: ${task.gitCheckpoint.supported ? (task.gitCheckpoint.clean ? "clean" : "dirty") : "not available"}` : undefined,
+    task.gitCheckpoint?.head ? `Git HEAD: ${task.gitCheckpoint.head}` : undefined,
+    task.gitDiff?.files && task.gitDiff.files.length > 0 ? `Git diff files: ${task.gitDiff.files.map(file => `${file.status}:${file.path}`).join(", ")}` : undefined,
+    task.rollback ? `Rollback: ${task.rollback.status}` : undefined,
+    task.rollback?.error ? `Rollback error: ${task.rollback.error}` : undefined,
     task.maxRepairAttempts !== undefined ? `Max repair attempts: ${task.maxRepairAttempts}` : undefined,
     task.repairAttempt !== undefined ? `Repair attempt: ${task.repairAttempt}` : undefined,
+    task.maxContinuationAttempts !== undefined ? `Max continuation attempts: ${task.maxContinuationAttempts}` : undefined,
+    task.continuationAttempt !== undefined ? `Continuation attempt: ${task.continuationAttempt}` : undefined,
     task.model ? `Requested model: ${task.model}` : undefined,
     task.effort ? `Effort: ${task.effort}` : undefined,
     task.timeoutMs ? `Timeout: ${task.timeoutMs}ms` : undefined,
@@ -1308,10 +1524,19 @@ function formatTask(task: {
   ].filter(Boolean).join("\n");
 }
 
+function formatGuardrails(guardrails?: Array<{ kind: string; severity: string; message: string; file?: string }>): string | undefined {
+  if (!guardrails || guardrails.length === 0) return undefined;
+  return `Guardrails: ${guardrails.map(issue =>
+    `${issue.severity}:${issue.kind}${issue.file ? `(${issue.file})` : ""}`
+  ).join(", ")}`;
+}
+
 function formatBackgroundOutput(output: Awaited<ReturnType<typeof readBackgroundOutput>>): string {
   const lines = [
     formatTask(output.task),
     "",
+    output.deliveryReport ? output.deliveryReport.markdown : undefined,
+    output.deliveryReport ? "" : undefined,
     ...output.artifacts.flatMap(artifact => [
       `Artifact: ${artifact.path}`,
       artifact.content || "(empty)",
@@ -1399,6 +1624,15 @@ function formatCodeDiagnostics(diagnostics: Array<CodeLocation & { code?: number
     "Diagnostics",
     ...diagnostics.map(diagnostic => `- ${diagnostic.category} ${diagnostic.code === undefined ? "" : diagnostic.code} ${diagnostic.file}:${diagnostic.line}:${diagnostic.column} ${diagnostic.message}`)
   ].join("\n");
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function errorResult(message: string): CallToolResult {

@@ -18,6 +18,7 @@ describe("mcpServer", () => {
       const tools = await client.listTools();
       assert.ok(tools.tools.some(tool => tool.name === "provider_doctor"));
       assert.ok(tools.tools.some(tool => tool.name === "command_catalog"));
+      assert.ok(tools.tools.some(tool => tool.name === "task_preview"));
       assert.ok(tools.tools.some(tool => tool.name === "run_command"));
       assert.ok(tools.tools.some(tool => tool.name === "claude_run_stage"));
       assert.ok(tools.tools.some(tool => tool.name === "delegate_task"));

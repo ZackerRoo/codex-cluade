@@ -13,6 +13,7 @@ export function execFileCapture(
   options: {
     cwd: string;
     timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
     input?: string;
     signal?: AbortSignal;
     onStdoutChunk?: (chunk: string) => void;
@@ -22,6 +23,7 @@ export function execFileCapture(
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
       stdio: ["pipe", "pipe", "pipe"]
     });
 
@@ -78,6 +80,7 @@ export function execShellCapture(
   options: {
     cwd: string;
     timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
   }
 ): Promise<ExecResult> {
