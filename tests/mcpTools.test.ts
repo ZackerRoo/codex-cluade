@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
 import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
+import { TeamStore } from "../src/workflow/TeamStore.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
 
 describe("runClaudeStageTool", () => {
@@ -946,13 +947,58 @@ describe("delegate task MCP tools", () => {
     assert.match(entries?.[0]?.summary ?? "", /repository service helpers/);
     assert.match(String(result.content[0].type === "text" ? result.content[0].text : ""), /# Project memory/);
   });
+
+  it("manages Team Mode messages and shared tasks", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-tool-test-"));
+    const tools = await createTestTaskTools({ teamStore: new TeamStore({ rootDir }) });
+
+    const created = await tools.teamCreateTool({
+      teamId: "team-tool",
+      workspace: "/tmp/project",
+      goal: "Fix login bug",
+      members: [
+        { id: "lead", role: "lead", profile: "sisyphus" },
+        { id: "coder", role: "implementation", profile: "coder", agent: "claude" }
+      ]
+    });
+    assert.equal(created.structuredContent?.ok, true);
+
+    const task = await tools.teamTaskCreateTool({
+      teamId: "team-tool",
+      title: "Inspect auth flow",
+      assignee: "coder"
+    });
+    const taskId = (task.structuredContent?.task as { id?: string } | undefined)?.id;
+    assert.equal(taskId, "team-tool-task-1");
+
+    const message = await tools.teamSendMessageTool({
+      teamId: "team-tool",
+      from: "lead",
+      to: "coder",
+      taskId,
+      body: "Please inspect auth flow and report root cause."
+    });
+    assert.match(String(message.content[0].type === "text" ? message.content[0].text : ""), /Please inspect auth flow/);
+
+    const inbox = await tools.teamInboxTool({ teamId: "team-tool", memberId: "coder" });
+    assert.equal((inbox.structuredContent?.messages as unknown[] | undefined)?.length, 1);
+
+    const updated = await tools.teamTaskUpdateTool({ teamId: "team-tool", taskId: taskId!, status: "in_progress", linkedTaskId: "delegate-1" });
+    assert.equal((updated.structuredContent?.task as { status?: string; linkedTaskId?: string } | undefined)?.status, "in_progress");
+    assert.equal((updated.structuredContent?.task as { status?: string; linkedTaskId?: string } | undefined)?.linkedTaskId, "delegate-1");
+
+    const status = await tools.teamStatusTool({ teamId: "team-tool" });
+    assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Messages: 1/);
+    assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Tasks: 1/);
+  });
 });
 
 async function createTestTaskTools(options: Parameters<typeof createTaskTools>[0] = {}): Promise<TaskToolSet> {
   const rootDir = await mkdtemp(join(tmpdir(), "bridge-mcp-task-store-"));
   return createTaskTools({
     ...options,
-    taskStore: new TaskStore({ rootDir })
+    taskStore: new TaskStore({ rootDir }),
+    teamStore: options.teamStore ?? new TeamStore({ rootDir: join(rootDir, "teams") })
   });
 }
 

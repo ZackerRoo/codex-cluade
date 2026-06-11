@@ -22,7 +22,7 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import { ProviderDoctor } from "../doctor/ProviderDoctor.js";
-import type { AgentName, AgentProfileName, Stage, StageResult, TaskCategory, TaskMode, TaskPreview } from "../types.js";
+import type { AgentName, AgentProfileName, AgentTeam, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 import { createGitCheckpoint } from "../utils/git.js";
 import { buildWebVerifyCommand } from "../verification/WebAppVerifier.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
@@ -30,6 +30,7 @@ import { createPlanId, PlanStore, type PlanRecord } from "../workflow/PlanStore.
 import { ProjectMemoryStore, renderProjectMemoryMarkdown } from "../workflow/ProjectMemory.js";
 import { TaskManager } from "../workflow/TaskManager.js";
 import { buildTaskPreview } from "../workflow/TaskPreview.js";
+import { TeamStore } from "../workflow/TeamStore.js";
 import type { TaskStore } from "../workflow/TaskStore.js";
 import { readBackgroundOutput } from "./backgroundOutput.js";
 
@@ -164,6 +165,54 @@ export interface TaskPreviewArgs {
   verifyCommand?: string;
 }
 
+export interface TeamCreateArgs {
+  teamId?: string;
+  workspace: string;
+  goal: string;
+  lead?: string;
+  members?: Array<{
+    id?: string;
+    role: string;
+    profile?: string;
+    agent?: AgentName;
+    summary?: string;
+  }>;
+}
+
+export interface TeamMessageArgs {
+  teamId: string;
+  from: string;
+  to?: string;
+  body: string;
+  taskId?: string;
+}
+
+export interface TeamInboxArgs {
+  teamId: string;
+  memberId: string;
+}
+
+export interface TeamTaskCreateArgs {
+  teamId: string;
+  title: string;
+  description?: string;
+  assignee?: string;
+  linkedTaskId?: string;
+}
+
+export interface TeamTaskUpdateArgs {
+  teamId: string;
+  taskId: string;
+  status?: TeamTaskStatus;
+  assignee?: string;
+  linkedTaskId?: string;
+  description?: string;
+}
+
+export interface TeamStatusArgs {
+  teamId: string;
+}
+
 export interface TaskToolSet {
   providerDoctorTool(): Promise<CallToolResult>;
   commandCatalogTool(): Promise<CallToolResult>;
@@ -180,6 +229,12 @@ export interface TaskToolSet {
   taskRollbackTool(args: TaskLookupArgs): Promise<CallToolResult>;
   backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
   projectMemoryTool(args: ProjectMemoryArgs): Promise<CallToolResult>;
+  teamCreateTool(args: TeamCreateArgs): Promise<CallToolResult>;
+  teamSendMessageTool(args: TeamMessageArgs): Promise<CallToolResult>;
+  teamInboxTool(args: TeamInboxArgs): Promise<CallToolResult>;
+  teamTaskCreateTool(args: TeamTaskCreateArgs): Promise<CallToolResult>;
+  teamTaskUpdateTool(args: TeamTaskUpdateArgs): Promise<CallToolResult>;
+  teamStatusTool(args: TeamStatusArgs): Promise<CallToolResult>;
   taskListTool(): Promise<CallToolResult>;
   agentCatalogTool(): Promise<CallToolResult>;
   codeSymbolsTool(args: CodeSymbolsArgs): Promise<CallToolResult>;
@@ -238,11 +293,13 @@ export function createTaskTools(options: {
   config?: BridgeConfig;
   taskStore?: TaskStore;
   taskManager?: TaskManager;
+  teamStore?: TeamStore;
 } = {}): TaskToolSet {
   const config = options.config ?? loadBridgeConfig();
   const registry = new AgentRegistry(config);
   const commandRegistry = new CommandRegistry(config);
   const manager = options.taskManager ?? createTaskManager({ config, registry, claude: options.claude, taskStore: options.taskStore });
+  const teamStore = options.teamStore ?? new TeamStore();
 
   return {
     async providerDoctorTool(): Promise<CallToolResult> {
@@ -611,6 +668,77 @@ export function createTaskTools(options: {
           markdownPath: store.markdownPath,
           markdown
         }
+      };
+    },
+
+    async teamCreateTool(args: TeamCreateArgs): Promise<CallToolResult> {
+      const validationError = validateTeamCreateArgs(args);
+      if (validationError) return errorResult(validationError);
+      const team = teamStore.create({
+        id: args.teamId,
+        workspace: args.workspace,
+        goal: args.goal,
+        lead: args.lead,
+        members: args.members
+      });
+      return {
+        content: [{ type: "text", text: formatTeam(team) }],
+        structuredContent: { ok: true, team }
+      };
+    },
+
+    async teamSendMessageTool(args: TeamMessageArgs): Promise<CallToolResult> {
+      const validationError = validateTeamMessageArgs(args);
+      if (validationError) return errorResult(validationError);
+      const message = teamStore.sendMessage(args);
+      if (!message) return errorResult(`Team not found: ${args.teamId}`);
+      return {
+        content: [{ type: "text", text: formatTeamMessage(message) }],
+        structuredContent: { ok: true, message }
+      };
+    },
+
+    async teamInboxTool(args: TeamInboxArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      if (!args.memberId) return errorResult("memberId is required");
+      const messages = teamStore.inbox(args.teamId, args.memberId);
+      if (!messages) return errorResult(`Team not found: ${args.teamId}`);
+      return {
+        content: [{ type: "text", text: messages.length === 0 ? "No team messages." : messages.map(formatTeamMessage).join("\n\n") }],
+        structuredContent: { ok: true, teamId: args.teamId, memberId: args.memberId, messages }
+      };
+    },
+
+    async teamTaskCreateTool(args: TeamTaskCreateArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      if (!args.title) return errorResult("title is required");
+      const task = teamStore.createTask(args);
+      if (!task) return errorResult(`Team not found: ${args.teamId}`);
+      return {
+        content: [{ type: "text", text: formatTeamTask(task) }],
+        structuredContent: { ok: true, task }
+      };
+    },
+
+    async teamTaskUpdateTool(args: TeamTaskUpdateArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      if (!args.taskId) return errorResult("taskId is required");
+      if (args.status !== undefined && !isTeamTaskStatus(args.status)) return errorResult(`invalid status: ${String(args.status)}`);
+      const task = teamStore.updateTask(args);
+      if (!task) return errorResult(`Team task not found: ${args.teamId}/${args.taskId}`);
+      return {
+        content: [{ type: "text", text: formatTeamTask(task) }],
+        structuredContent: { ok: true, task }
+      };
+    },
+
+    async teamStatusTool(args: TeamStatusArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      const team = teamStore.get(args.teamId);
+      if (!team) return errorResult(`Team not found: ${args.teamId}`);
+      return {
+        content: [{ type: "text", text: formatTeam(team) }],
+        structuredContent: { ok: true, team }
       };
     },
 
@@ -1070,6 +1198,23 @@ function validateTaskPreviewArgs(args: TaskPreviewArgs): string | undefined {
   return undefined;
 }
 
+function validateTeamCreateArgs(args: TeamCreateArgs): string | undefined {
+  if (!args.workspace) return "workspace is required";
+  if (!args.goal) return "goal is required";
+  for (const member of args.members ?? []) {
+    if (!member.role) return "member role is required";
+    if (member.agent !== undefined && !isAgent(member.agent)) return `invalid member agent: ${String(member.agent)}`;
+  }
+  return undefined;
+}
+
+function validateTeamMessageArgs(args: TeamMessageArgs): string | undefined {
+  if (!args.teamId) return "teamId is required";
+  if (!args.from) return "from is required";
+  if (!args.body) return "body is required";
+  return undefined;
+}
+
 function validateDelegateArgs(args: DelegateTaskArgs, registry = new AgentRegistry()): string | undefined {
   if (!args.workspace) return "workspace is required";
   if (!args.request) return "request is required";
@@ -1190,6 +1335,10 @@ function isStage(value: unknown): value is Stage {
 
 function isAgent(value: unknown): value is AgentName {
   return value === "claude" || value === "codex" || value === "codex-cli" || value === "gemini" || value === "opencode" || value === "myflicker";
+}
+
+function isTeamTaskStatus(value: unknown): value is TeamTaskStatus {
+  return value === "todo" || value === "in_progress" || value === "done" || value === "blocked" || value === "cancelled";
 }
 
 function buildPlannerRequest(request: string): string {
@@ -1401,6 +1550,50 @@ function formatTaskPreview(preview: TaskPreview): string {
     preview.recommendedSetup?.preferredAgent !== undefined ? `- preferredAgent: ${preview.recommendedSetup.preferredAgent || "Auto"}` : undefined,
     preview.recommendedSetup?.requiresConfirmation ? "- requires confirmation: true" : undefined,
     ...(preview.recommendedSetup?.notes ?? []).map(note => `- note: ${note}`)
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatTeam(team: AgentTeam): string {
+  const taskCounts = team.tasks.reduce<Record<string, number>>((counts, task) => {
+    counts[task.status] = (counts[task.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  return [
+    `Team: ${team.id}`,
+    `Workspace: ${team.workspace}`,
+    `Goal: ${team.goal}`,
+    `Lead: ${team.lead}`,
+    `Members: ${team.members.length}`,
+    ...team.members.map(member => `- ${member.id}: ${member.role}${member.profile ? ` / ${member.profile}` : ""}${member.agent ? ` / ${member.agent}` : ""} (${member.status})`),
+    `Messages: ${team.messages.length}`,
+    `Tasks: ${team.tasks.length}${team.tasks.length > 0 ? ` (${Object.entries(taskCounts).map(([status, count]) => `${status}:${count}`).join(", ")})` : ""}`,
+    ...team.tasks.slice(0, 8).map(task => `- ${task.id}: ${task.status} ${task.title}${task.assignee ? ` @${task.assignee}` : ""}${task.linkedTaskId ? ` -> ${task.linkedTaskId}` : ""}`),
+    `Updated: ${team.updatedAt}`
+  ].join("\n");
+}
+
+function formatTeamMessage(message: TeamMessage): string {
+  return [
+    `Message: ${message.id}`,
+    `Team: ${message.teamId}`,
+    `From: ${message.from}`,
+    `To: ${message.to}`,
+    message.taskId ? `Task: ${message.taskId}` : undefined,
+    `Body: ${message.body}`,
+    `Created: ${message.createdAt}`
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatTeamTask(task: TeamTask): string {
+  return [
+    `Team task: ${task.id}`,
+    `Team: ${task.teamId}`,
+    `Title: ${task.title}`,
+    `Status: ${task.status}`,
+    task.assignee ? `Assignee: ${task.assignee}` : undefined,
+    task.linkedTaskId ? `Linked task: ${task.linkedTaskId}` : undefined,
+    task.description ? `Description: ${task.description}` : undefined,
+    `Updated: ${task.updatedAt}`
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 

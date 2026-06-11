@@ -231,6 +231,54 @@ export interface ProjectMemory {
   entries: ProjectMemoryEntry[];
 }
 
+export type TeamMemberStatus = "active" | "idle" | "done" | "blocked";
+export type TeamTaskStatus = "todo" | "in_progress" | "done" | "blocked" | "cancelled";
+
+export interface TeamMember {
+  id: string;
+  role: string;
+  profile?: AgentProfileName;
+  agent?: AgentName;
+  status: TeamMemberStatus;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamMessage {
+  id: string;
+  teamId: string;
+  from: string;
+  to: string;
+  body: string;
+  taskId?: string;
+  createdAt: string;
+}
+
+export interface TeamTask {
+  id: string;
+  teamId: string;
+  title: string;
+  description: string;
+  assignee?: string;
+  status: TeamTaskStatus;
+  linkedTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentTeam {
+  id: string;
+  workspace: string;
+  goal: string;
+  lead: string;
+  members: TeamMember[];
+  messages: TeamMessage[];
+  tasks: TeamTask[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TaskGitCheckpoint {
   supported: boolean;
   clean: boolean;

@@ -11,6 +11,21 @@ const effortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]).optional(
 const agentSchema = z.enum(["claude", "codex", "codex-cli", "gemini", "opencode", "myflicker"]).optional();
 const modeSchema = z.enum(["sync", "background"]).optional();
 const autoDispatchStrategySchema = z.enum(["auto", "direct", "plan"]).optional();
+const teamTaskStatusSchema = z.enum(["todo", "in_progress", "done", "blocked", "cancelled"]).optional();
+const commandToolInputSchema = {
+  workspace: z.string().min(1).describe("Absolute workspace path where the task should run."),
+  request: z.string().min(1).describe("Natural-language task request."),
+  mode: modeSchema.describe("sync waits for completion; background returns a task id."),
+  runId: z.string().optional().describe("Optional run id for artifacts and task tracking."),
+  agentSessionId: z.string().optional().describe("Optional Claude session id to resume when Claude runs."),
+  preferredAgent: agentSchema.describe("Optional explicit agent override."),
+  loadSkills: z.array(z.string()).optional().describe("Configured skill names to inject into delegated prompts."),
+  model: z.string().optional().describe("Optional model argument for compatible providers."),
+  effort: effortSchema.describe("Optional effort level."),
+  timeoutMs: z.number().positive().optional().describe("Optional timeout in milliseconds."),
+  verifyCommand: z.string().optional().describe("Optional shell command to verify the completed task, such as npm test."),
+  maxRepairAttempts: z.number().int().min(0).optional().describe("How many automatic repair tasks to launch when verification fails.")
+};
 
 export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServer {
   const server = new McpServer({
@@ -109,6 +124,8 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
     },
     async args => taskTools.runCommandTool(args)
   );
+
+  registerSlashCommandTools(server, taskTools);
 
   server.registerTool(
     "claude_run_stage",
@@ -319,6 +336,138 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "team_create",
+    {
+      title: "Create agent team",
+      description: "Create a persistent Team Mode workspace with members, shared messages, and a shared task board.",
+      inputSchema: {
+        teamId: z.string().optional().describe("Optional stable team id. Defaults to a generated id."),
+        workspace: z.string().min(1).describe("Absolute workspace path for this team."),
+        goal: z.string().min(1).describe("The team's overall goal."),
+        lead: z.string().optional().describe("Lead member id. Defaults to lead."),
+        members: z.array(z.object({
+          id: z.string().optional(),
+          role: z.string().min(1),
+          profile: z.string().optional(),
+          agent: z.enum(["claude", "codex", "codex-cli", "gemini", "opencode", "myflicker"]).optional(),
+          summary: z.string().optional()
+        })).optional().describe("Initial team members.")
+      },
+      annotations: {
+        title: "Create agent team",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamCreateTool(args)
+  );
+
+  server.registerTool(
+    "team_send_message",
+    {
+      title: "Send team message",
+      description: "Send a message to one member or all members in a Team Mode workspace.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        from: z.string().min(1).describe("Sender member id."),
+        to: z.string().optional().describe("Recipient member id. Defaults to all."),
+        body: z.string().min(1).describe("Message body."),
+        taskId: z.string().optional().describe("Optional related team task id.")
+      },
+      annotations: {
+        title: "Send team message",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamSendMessageTool(args)
+  );
+
+  server.registerTool(
+    "team_inbox",
+    {
+      title: "Read team inbox",
+      description: "Read messages visible to a team member, including broadcasts and messages sent by that member.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        memberId: z.string().min(1).describe("Member id whose inbox should be read.")
+      },
+      annotations: {
+        title: "Read team inbox",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamInboxTool(args)
+  );
+
+  server.registerTool(
+    "team_task_create",
+    {
+      title: "Create team task",
+      description: "Create a task on the shared Team Mode task board.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        title: z.string().min(1).describe("Task title."),
+        description: z.string().optional().describe("Task details."),
+        assignee: z.string().optional().describe("Optional member id."),
+        linkedTaskId: z.string().optional().describe("Optional delegated background task id.")
+      },
+      annotations: {
+        title: "Create team task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamTaskCreateTool(args)
+  );
+
+  server.registerTool(
+    "team_task_update",
+    {
+      title: "Update team task",
+      description: "Update status, assignee, description, or linked task id for a Team Mode task.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        taskId: z.string().min(1).describe("Team task id."),
+        status: teamTaskStatusSchema.describe("New task status."),
+        assignee: z.string().optional().describe("New assignee member id."),
+        linkedTaskId: z.string().optional().describe("Linked delegated background task id."),
+        description: z.string().optional().describe("Updated task description.")
+      },
+      annotations: {
+        title: "Update team task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamTaskUpdateTool(args)
+  );
+
+  server.registerTool(
+    "team_status",
+    {
+      title: "Team status",
+      description: "Read members, messages, and shared task board summary for a Team Mode workspace.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id.")
+      },
+      annotations: {
+        title: "Team status",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamStatusTool(args)
+  );
+
+  server.registerTool(
     "task_list",
     {
       title: "List tasks",
@@ -513,6 +662,83 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   return server;
+}
+
+function registerSlashCommandTools(server: McpServer, taskTools: TaskToolSet): void {
+  const definitions = [
+    {
+      name: "start_work",
+      command: "/start-work",
+      title: "Start work",
+      description: "Start implementation from a natural-language request using the bridge auto-dispatch workflow."
+    },
+    {
+      name: "ultrawork_task",
+      command: "/ultrawork",
+      title: "Ultrawork task",
+      description: "Plan first, split implementation into parallel child tasks, then run review and workflow verification."
+    },
+    {
+      name: "plan_work",
+      command: "/plan-work",
+      title: "Plan work",
+      description: "Create a saved implementation plan without executing it."
+    },
+    {
+      name: "review_work",
+      command: "/review-work",
+      title: "Review work",
+      description: "Run an independent review stage for the current workspace."
+    },
+    {
+      name: "multi_work",
+      command: "/multi-work",
+      title: "Multi-provider work",
+      description: "Start implementation using the multi-provider fallback execution profile."
+    },
+    {
+      name: "explore_code",
+      command: "/explore",
+      title: "Explore code",
+      description: "Analyze and summarize the codebase without intentionally editing source files."
+    },
+    {
+      name: "frontend_work",
+      command: "/frontend-work",
+      title: "Frontend work",
+      description: "Start frontend implementation with the frontend specialist profile."
+    },
+    {
+      name: "sisyphus_work",
+      command: "/sisyphus-work",
+      title: "Sisyphus work",
+      description: "Start scoped implementation with the Sisyphus execution profile."
+    },
+    {
+      name: "momus_review",
+      command: "/momus-review",
+      title: "Momus review",
+      description: "Run strict Momus review for bugs, regressions, missing tests, and residual risk."
+    }
+  ];
+
+  for (const definition of definitions) {
+    server.registerTool(
+      definition.name,
+      {
+        title: definition.title,
+        description: definition.description,
+        inputSchema: commandToolInputSchema,
+        annotations: {
+          title: definition.title,
+          readOnlyHint: definition.command === "/explore" || definition.command.endsWith("review") || definition.command === "/plan-work",
+          destructiveHint: false,
+          openWorldHint: false
+        }
+      },
+      async args => taskTools.runCommandTool({ ...args, command: definition.command })
+    );
+  }
 }
 
 async function main(): Promise<void> {

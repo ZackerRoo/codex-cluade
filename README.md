@@ -244,10 +244,12 @@ Background tasks return a `taskId`. Use:
 - `task_resume`: start a background retry that resumes the latest Claude session from a previous task
 - `task_rollback`: rollback git changes from a task when its checkpoint started from a clean working tree
 - `project_memory`: read the workspace project memory injected into future agent prompts
+- Team Mode tools: `team_create`, `team_send_message`, `team_inbox`, `team_task_create`, `team_task_update`, and `team_status` provide a persistent shared message bus and task board for lead/member agent coordination
 - `agent_catalog`: list available agents, categories, and profiles
 - `provider_doctor`: check local provider CLI availability and versions
 - `command_catalog`: list slash-style command templates
 - `run_command`: run a command template such as `/ultrawork Build a game`
+- Slash-command convenience tools are also exposed directly for Codex discovery: `start_work`, `ultrawork_task`, `plan_work`, `review_work`, `multi_work`, `explore_code`, `frontend_work`, `sisyphus_work`, and `momus_review`. These are MCP tools that wrap the slash-style templates; they are not Codex built-in slash-popup commands.
 - `code_symbols`: parse a TypeScript/JavaScript file with AST and list classes, interfaces, functions, methods, variables, types, and enums
 - `code_definition`: use TypeScript language service or a configured language server to find symbol definitions at a file position
 - `code_references`: use TypeScript language service or a configured language server to find symbol references at a file position
@@ -260,6 +262,8 @@ Command templates:
 - `/ultrawork <request>`: create a saved plan with `prometheus`, then launch implementation with `multi-coder` provider fallback
 - `/review-work <request>`: launch a reviewer task
 - `/multi-work <request>`: launch implementation with `multi-coder` provider fallback
+
+Team Mode is a persistent coordination layer rather than a terminal UI. It stores teams under `~/.codex-claude/teams/*.json`; a lead agent can create a team, create shared tasks, send messages to one member or all members, and members can read their inbox. Use delegated background tasks for actual execution, then link their task ids back to the shared team task board with `team_task_update.linkedTaskId`.
 
 Plan-driven workflow tools:
 
