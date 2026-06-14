@@ -22,7 +22,7 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import { ProviderDoctor } from "../doctor/ProviderDoctor.js";
-import type { AgentName, AgentProfileName, AgentTeam, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
+import type { AgentName, AgentProfileName, AgentTeam, DelegatedTask, Effort, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamBudget, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 import { createGitCheckpoint } from "../utils/git.js";
 import { buildWebVerifyCommand } from "../verification/WebAppVerifier.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
@@ -170,6 +170,10 @@ export interface TeamCreateArgs {
   workspace: string;
   goal: string;
   lead?: string;
+  template?: string;
+  autoStart?: boolean;
+  autoMerge?: boolean;
+  budget?: TeamBudget;
   members?: Array<{
     id?: string;
     role: string;
@@ -177,6 +181,23 @@ export interface TeamCreateArgs {
     agent?: AgentName;
     summary?: string;
   }>;
+}
+
+export interface TeamCreateFromTemplateArgs {
+  teamId?: string;
+  template: string;
+  workspace: string;
+  goal: string;
+  autoStart?: boolean;
+  autoMerge?: boolean;
+  budget?: TeamBudget;
+}
+
+export interface TeamCoordinatorRunArgs {
+  teamId: string;
+  autoStart?: boolean;
+  autoMerge?: boolean;
+  maxStarts?: number;
 }
 
 export interface TeamMessageArgs {
@@ -209,6 +230,22 @@ export interface TeamTaskUpdateArgs {
   description?: string;
 }
 
+export interface TeamTaskStartArgs {
+  teamId: string;
+  taskId: string;
+  stage?: Stage;
+  profile?: AgentProfileName;
+  preferredAgent?: AgentName;
+  mode?: TaskMode;
+  request?: string;
+  verifyCommand?: string;
+  model?: string;
+  effort?: Effort;
+  timeoutMs?: number;
+  maxRepairAttempts?: number;
+  loadSkills?: string[];
+}
+
 export interface TeamStatusArgs {
   teamId: string;
 }
@@ -230,11 +267,16 @@ export interface TaskToolSet {
   backgroundOutputTool(args: TaskLookupArgs): Promise<CallToolResult>;
   projectMemoryTool(args: ProjectMemoryArgs): Promise<CallToolResult>;
   teamCreateTool(args: TeamCreateArgs): Promise<CallToolResult>;
+  teamTemplatesTool(): Promise<CallToolResult>;
+  teamCreateFromTemplateTool(args: TeamCreateFromTemplateArgs): Promise<CallToolResult>;
+  teamCoordinatorRunTool(args: TeamCoordinatorRunArgs): Promise<CallToolResult>;
   teamSendMessageTool(args: TeamMessageArgs): Promise<CallToolResult>;
   teamInboxTool(args: TeamInboxArgs): Promise<CallToolResult>;
   teamTaskCreateTool(args: TeamTaskCreateArgs): Promise<CallToolResult>;
   teamTaskUpdateTool(args: TeamTaskUpdateArgs): Promise<CallToolResult>;
+  teamTaskStartTool(args: TeamTaskStartArgs): Promise<CallToolResult>;
   teamStatusTool(args: TeamStatusArgs): Promise<CallToolResult>;
+  teamListTool(): Promise<CallToolResult>;
   taskListTool(): Promise<CallToolResult>;
   agentCatalogTool(): Promise<CallToolResult>;
   codeSymbolsTool(args: CodeSymbolsArgs): Promise<CallToolResult>;
@@ -242,6 +284,113 @@ export interface TaskToolSet {
   codeReferencesTool(args: CodePositionArgs): Promise<CallToolResult>;
   codeDiagnosticsTool(args: CodeDiagnosticsArgs): Promise<CallToolResult>;
 }
+
+interface TeamTemplateDefinition {
+  name: string;
+  description: string;
+  members: NonNullable<TeamCreateArgs["members"]>;
+  tasks: Array<{ title: string; description?: string; assignee?: string }>;
+  budget: TeamBudget;
+}
+
+const teamTemplates: Record<string, TeamTemplateDefinition> = {
+  "bugfix-team": {
+    name: "bugfix-team",
+    description: "Investigate, implement, and review a bug fix.",
+    members: [
+      { id: "investigator", role: "root cause analysis", profile: "analyst", agent: "codex-cli" },
+      { id: "coder", role: "implementation", profile: "coder", agent: "claude" },
+      { id: "reviewer", role: "review", profile: "reviewer", agent: "codex-cli" },
+      { id: "merger", role: "merge and stabilization", profile: "coder", agent: "claude" }
+    ],
+    tasks: [
+      { title: "Find the root cause and affected files", assignee: "investigator" },
+      { title: "Implement the smallest correct fix", assignee: "coder" },
+      { title: "Review the fix and verification result", assignee: "reviewer" }
+    ],
+    budget: { maxRunning: 2, maxTasks: 8, maxRepairAttempts: 1, allowedAgents: ["claude", "codex-cli", "codex"] }
+  },
+  "frontend-team": {
+    name: "frontend-team",
+    description: "Build or refine a frontend feature with review.",
+    members: [
+      { id: "designer", role: "frontend planning", profile: "planner", agent: "codex-cli" },
+      { id: "frontend", role: "frontend implementation", profile: "coder", agent: "claude" },
+      { id: "reviewer", role: "ux and code review", profile: "reviewer", agent: "codex-cli" },
+      { id: "merger", role: "integration", profile: "coder", agent: "claude" }
+    ],
+    tasks: [
+      { title: "Plan the user flow, layout, and component changes", assignee: "designer" },
+      { title: "Implement the frontend feature", assignee: "frontend" },
+      { title: "Review responsive behavior, usability, and code quality", assignee: "reviewer" }
+    ],
+    budget: { maxRunning: 2, maxTasks: 8, maxRepairAttempts: 1, allowedAgents: ["claude", "codex-cli", "gemini", "codex"] }
+  },
+  "backend-team": {
+    name: "backend-team",
+    description: "Design, implement, and verify a backend change.",
+    members: [
+      { id: "architect", role: "backend design", profile: "planner", agent: "codex-cli" },
+      { id: "backend", role: "backend implementation", profile: "coder", agent: "claude" },
+      { id: "tester", role: "verification", profile: "reviewer", agent: "codex-cli" },
+      { id: "merger", role: "integration", profile: "coder", agent: "claude" }
+    ],
+    tasks: [
+      { title: "Design the backend approach and identify contracts", assignee: "architect" },
+      { title: "Implement the backend change", assignee: "backend" },
+      { title: "Verify behavior and failure cases", assignee: "tester" }
+    ],
+    budget: { maxRunning: 2, maxTasks: 8, maxRepairAttempts: 1, allowedAgents: ["claude", "codex-cli", "myflicker", "codex"] }
+  },
+  "research-team": {
+    name: "research-team",
+    description: "Analyze a codebase or topic without editing by default.",
+    members: [
+      { id: "researcher", role: "code exploration", profile: "analyst", agent: "codex-cli" },
+      { id: "librarian", role: "documentation synthesis", profile: "analyst", agent: "gemini" },
+      { id: "reviewer", role: "accuracy review", profile: "reviewer", agent: "codex-cli" }
+    ],
+    tasks: [
+      { title: "Explore the codebase and identify key modules", assignee: "researcher" },
+      { title: "Synthesize findings into a structured report", assignee: "librarian" },
+      { title: "Review the report for gaps and incorrect claims", assignee: "reviewer" }
+    ],
+    budget: { maxRunning: 2, maxTasks: 6, maxRepairAttempts: 0, allowedAgents: ["codex-cli", "gemini", "codex"] }
+  },
+  "large-refactor-team": {
+    name: "large-refactor-team",
+    description: "Plan, split, implement, merge, and review a larger refactor.",
+    members: [
+      { id: "planner", role: "refactor planning", profile: "planner", agent: "codex-cli" },
+      { id: "coder-a", role: "implementation slice A", profile: "coder", agent: "claude" },
+      { id: "coder-b", role: "implementation slice B", profile: "coder", agent: "myflicker" },
+      { id: "merger", role: "merge and consistency", profile: "coder", agent: "claude" },
+      { id: "reviewer", role: "final review", profile: "reviewer", agent: "codex-cli" }
+    ],
+    tasks: [
+      { title: "Create a safe refactor plan and identify independent slices", assignee: "planner" },
+      { title: "Implement the first refactor slice", assignee: "coder-a" },
+      { title: "Implement the second refactor slice", assignee: "coder-b" },
+      { title: "Review final behavior and integration risk", assignee: "reviewer" }
+    ],
+    budget: { maxRunning: 3, maxTasks: 10, maxRepairAttempts: 1, allowedAgents: ["claude", "codex-cli", "myflicker", "codex"] }
+  },
+  "release-team": {
+    name: "release-team",
+    description: "Prepare release checks, documentation, and final review.",
+    members: [
+      { id: "checker", role: "release verification", profile: "reviewer", agent: "codex-cli" },
+      { id: "docs", role: "release notes", profile: "analyst", agent: "gemini" },
+      { id: "fixer", role: "release fixes", profile: "coder", agent: "claude" }
+    ],
+    tasks: [
+      { title: "Run release checks and identify blockers", assignee: "checker" },
+      { title: "Draft release notes and user-facing changes", assignee: "docs" },
+      { title: "Fix release blockers if any are found", assignee: "fixer" }
+    ],
+    budget: { maxRunning: 2, maxTasks: 8, maxRepairAttempts: 1, allowedAgents: ["claude", "codex-cli", "gemini", "codex"] }
+  }
+};
 
 export async function runClaudeStageTool(
   args: ClaudeRunStageArgs,
@@ -300,6 +449,230 @@ export function createTaskTools(options: {
   const commandRegistry = new CommandRegistry(config);
   const manager = options.taskManager ?? createTaskManager({ config, registry, claude: options.claude, taskStore: options.taskStore });
   const teamStore = options.teamStore ?? new TeamStore();
+
+  function syncLinkedTeamTasks(team: AgentTeam | undefined): AgentTeam | undefined {
+    if (!team) return undefined;
+    let current = team;
+    for (const teamTask of team.tasks) {
+      if (!teamTask.linkedTaskId) continue;
+      const linkedTask = manager.get(teamTask.linkedTaskId);
+      if (!linkedTask) continue;
+      const nextStatus = teamStatusForDelegatedTask(linkedTask);
+      if (nextStatus === teamTask.status) continue;
+      const updated = teamStore.updateTask({ teamId: team.id, taskId: teamTask.id, status: nextStatus });
+      if (updated) {
+        teamStore.sendMessage({
+          teamId: team.id,
+          from: "system",
+          to: teamTask.assignee ?? "all",
+          taskId: teamTask.id,
+          body: `Linked delegated task ${linkedTask.id} is now ${linkedTask.status}; team task marked ${nextStatus}.`
+        });
+      }
+      current = teamStore.get(team.id) ?? current;
+    }
+    return current;
+  }
+
+  function linkedTasksFor(team: AgentTeam): Array<Pick<DelegatedTask, "id" | "status" | "request" | "workspace" | "preferredAgent" | "profile" | "updatedAt" | "resultSummary" | "runtime">> {
+    return team.tasks
+      .map(teamTask => teamTask.linkedTaskId ? manager.get(teamTask.linkedTaskId) : undefined)
+      .filter((task): task is DelegatedTask => task !== undefined)
+      .map(task => ({
+        id: task.id,
+        status: task.status,
+        request: task.request,
+        workspace: task.workspace,
+        preferredAgent: task.preferredAgent,
+        profile: task.profile,
+        updatedAt: task.updatedAt,
+        resultSummary: task.resultSummary,
+        runtime: task.runtime
+      }));
+  }
+
+  async function startTeamTask(args: TeamTaskStartArgs): Promise<CallToolResult> {
+    if (!args.teamId) return errorResult("teamId is required");
+    if (!args.taskId) return errorResult("taskId is required");
+    const team = syncLinkedTeamTasks(teamStore.get(args.teamId));
+    if (!team) return errorResult(`Team not found: ${args.teamId}`);
+    const teamTask = team.tasks.find(task => task.id === args.taskId);
+    if (!teamTask) return errorResult(`Team task not found: ${args.teamId}/${args.taskId}`);
+    if (teamTask.linkedTaskId) return errorResult(`Team task is already linked to delegated task: ${teamTask.linkedTaskId}`);
+    const assignee = team.members.find(member => member.id === teamTask.assignee);
+    const profile = args.profile ?? (assignee?.profile as AgentProfileName | undefined);
+    if (profile && !registry.getProfile(profile)) return errorResult(`unknown profile: ${profile}`);
+    const preferredAgent = args.preferredAgent ?? assignee?.agent;
+    if (preferredAgent && !registry.getAgent(preferredAgent)) return errorResult(`unknown preferredAgent: ${preferredAgent}`);
+    const budgetError = validateTeamBudgetForStart(team, preferredAgent, manager);
+    if (budgetError) return errorResult(budgetError);
+    const explicitStages = args.stage ? [args.stage] : undefined;
+    const inferredCategory = !profile && !preferredAgent
+      ? registry.classifyTask({ request: teamTask.title, stages: explicitStages ?? [] })
+      : undefined;
+    const resolvedProfile = profile ? registry.getProfile(profile) : undefined;
+    const stages = explicitStages ?? resolvedProfile?.stages ?? defaultStagesForCategory(inferredCategory);
+    const skills = await resolveSkills(args.loadSkills, config);
+    const request = buildTeamTaskRequest(team, teamTask, args.request);
+    const result = await manager.run({
+      mode: args.mode ?? "background",
+      workspace: team.workspace,
+      request,
+      stages,
+      routing: {},
+      category: inferredCategory,
+      profile,
+      autoCategory: false,
+      preferredAgent,
+      model: args.model,
+      effort: args.effort,
+      timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
+      verifyCommand: args.verifyCommand,
+      maxRepairAttempts: args.maxRepairAttempts ?? team.budget?.maxRepairAttempts,
+      skills
+    });
+    const linkedTaskId = result.task?.id;
+    const linkedStatus: TeamTaskStatus = result.mode === "sync"
+      ? (result.result?.ok === true ? "done" : "blocked")
+      : "in_progress";
+    const updated = linkedTaskId
+      ? teamStore.updateTask({ teamId: team.id, taskId: teamTask.id, status: linkedStatus, linkedTaskId })
+      : teamTask;
+    if (linkedTaskId) {
+      teamStore.sendMessage({
+        teamId: team.id,
+        from: team.lead,
+        to: teamTask.assignee ?? "all",
+        taskId: teamTask.id,
+        body: `Started delegated task ${linkedTaskId} for team task ${teamTask.id}.`
+      });
+    }
+    return {
+      content: [{ type: "text", text: [
+        `Team task started: ${teamTask.id}`,
+        `Team: ${team.id}`,
+        linkedTaskId ? `Delegated task: ${linkedTaskId}` : "Delegated task: -",
+        updated ? `Status: ${updated.status}` : ""
+      ].filter(Boolean).join("\n") }],
+      structuredContent: {
+        ok: result.mode === "sync" ? result.result?.ok === true : true,
+        team,
+        teamTask: updated,
+        delegatedTaskId: linkedTaskId,
+        delegatedTask: result.task,
+        result
+      },
+      isError: result.mode === "sync" && result.result?.ok === false ? true : undefined
+    };
+  }
+
+  function createTeamFromTemplate(args: TeamCreateFromTemplateArgs): AgentTeam | undefined {
+    const template = teamTemplates[args.template];
+    if (!template) return undefined;
+    const team = teamStore.create({
+      id: args.teamId,
+      workspace: args.workspace,
+      goal: args.goal,
+      template: template.name,
+      budget: { ...template.budget, ...args.budget },
+      coordinator: {
+        enabled: true,
+        autoStart: args.autoStart ?? false,
+        autoMerge: args.autoMerge ?? true,
+        phase: "idle"
+      },
+      members: template.members
+    });
+    for (const task of template.tasks) {
+      teamStore.createTask({ teamId: team.id, ...task });
+    }
+    return teamStore.get(team.id) ?? team;
+  }
+
+  async function runTeamCoordinator(args: TeamCoordinatorRunArgs): Promise<CallToolResult> {
+    let team = syncLinkedTeamTasks(teamStore.get(args.teamId));
+    if (!team) return errorResult(`Team not found: ${args.teamId}`);
+    const autoStart = args.autoStart ?? team.coordinator?.autoStart ?? true;
+    const autoMerge = args.autoMerge ?? team.coordinator?.autoMerge ?? true;
+    const maxStarts = Math.max(0, args.maxStarts ?? team.budget?.maxRunning ?? 1);
+    const actions: string[] = [];
+    const startedTaskIds: string[] = [];
+
+    if (autoStart) {
+      for (const task of team.tasks.filter(item => item.status === "todo" && !item.linkedTaskId).slice(0, maxStarts)) {
+        const start = await startTeamTask({ teamId: team.id, taskId: task.id, mode: "background" });
+        if (start.isError) {
+          const message = String(start.content[0]?.type === "text" ? start.content[0].text : "failed to start team task");
+          actions.push(message);
+          break;
+        }
+        const delegatedTaskId = (start.structuredContent as { delegatedTaskId?: string }).delegatedTaskId;
+        startedTaskIds.push(task.id);
+        actions.push(`Started ${task.id}${delegatedTaskId ? ` -> ${delegatedTaskId}` : ""}`);
+        team = syncLinkedTeamTasks(teamStore.get(team.id)) ?? team;
+      }
+    }
+
+    const activeTeam = syncLinkedTeamTasks(teamStore.get(team.id)) ?? team;
+    const mergerTaskId = activeTeam.coordinator?.mergerTaskId;
+    const nonMergerTasks = activeTeam.tasks.filter(task => task.id !== mergerTaskId);
+    const allBaseDone = nonMergerTasks.length > 0 && nonMergerTasks.every(task => task.status === "done");
+    let finalTeam = activeTeam;
+
+    if (autoMerge && allBaseDone && !mergerTaskId) {
+      const merger = teamStore.createTask({
+        teamId: activeTeam.id,
+        title: "Merge and stabilize completed team work",
+        assignee: activeTeam.members.some(member => member.id === "merger") ? "merger" : activeTeam.lead,
+        description: buildMergerTaskDescription(activeTeam)
+      });
+      if (merger) {
+        teamStore.updateCoordinator(activeTeam.id, {
+          enabled: true,
+          autoStart,
+          autoMerge,
+          phase: "merging",
+          mergerTaskId: merger.id,
+          lastAction: `Created merger task ${merger.id}`
+        });
+        const started = await startTeamTask({
+          teamId: activeTeam.id,
+          taskId: merger.id,
+          mode: "background",
+          request: "Merge completed task outputs, resolve integration conflicts, keep behavior coherent, and report verification gaps."
+        });
+        const delegatedTaskId = (started.structuredContent as { delegatedTaskId?: string } | undefined)?.delegatedTaskId;
+        actions.push(`Created merger task ${merger.id}${delegatedTaskId ? ` -> ${delegatedTaskId}` : ""}`);
+      }
+    }
+
+    finalTeam = syncLinkedTeamTasks(teamStore.get(activeTeam.id)) ?? activeTeam;
+    const phase = phaseForTeam(finalTeam);
+    finalTeam = teamStore.updateCoordinator(finalTeam.id, {
+      enabled: true,
+      autoStart,
+      autoMerge,
+      phase,
+      lastAction: actions.at(-1) ?? "No action needed"
+    }) ?? finalTeam;
+
+    return {
+      content: [{ type: "text", text: [
+        `Team coordinator: ${finalTeam.id}`,
+        `Phase: ${phase}`,
+        `Started: ${startedTaskIds.length}`,
+        actions.length > 0 ? `Actions:\n- ${actions.join("\n- ")}` : "Actions: none"
+      ].join("\n") }],
+      structuredContent: {
+        ok: true,
+        team: finalTeam,
+        phase,
+        actions,
+        startedTaskIds,
+        linkedTasks: linkedTasksFor(finalTeam)
+      }
+    };
+  }
 
   return {
     async providerDoctorTool(): Promise<CallToolResult> {
@@ -671,6 +1044,43 @@ export function createTaskTools(options: {
       };
     },
 
+    async teamTemplatesTool(): Promise<CallToolResult> {
+      const templates = Object.values(teamTemplates);
+      return {
+        content: [{ type: "text", text: templates.map(template => `${template.name}: ${template.description}`).join("\n") }],
+        structuredContent: { ok: true, templates }
+      };
+    },
+
+    async teamCreateFromTemplateTool(args: TeamCreateFromTemplateArgs): Promise<CallToolResult> {
+      if (!args.workspace) return errorResult("workspace is required");
+      if (!args.goal) return errorResult("goal is required");
+      if (!args.template) return errorResult("template is required");
+      const team = createTeamFromTemplate(args);
+      if (!team) return errorResult(`Unknown team template: ${args.template}`);
+      let coordinator: CallToolResult | undefined;
+      if (args.autoStart) coordinator = await runTeamCoordinator({ teamId: team.id, autoStart: true, autoMerge: args.autoMerge });
+      const latest = syncLinkedTeamTasks(teamStore.get(team.id)) ?? team;
+      return {
+        content: [{ type: "text", text: [
+          `Team created: ${latest.id}`,
+          `Template: ${latest.template ?? args.template}`,
+          `Tasks: ${latest.tasks.length}`,
+          coordinator ? "Coordinator started." : "Coordinator idle."
+        ].join("\n") }],
+        structuredContent: {
+          ok: true,
+          team: latest,
+          coordinator: coordinator?.structuredContent
+        }
+      };
+    },
+
+    async teamCoordinatorRunTool(args: TeamCoordinatorRunArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      return runTeamCoordinator(args);
+    },
+
     async teamCreateTool(args: TeamCreateArgs): Promise<CallToolResult> {
       const validationError = validateTeamCreateArgs(args);
       if (validationError) return errorResult(validationError);
@@ -679,6 +1089,14 @@ export function createTaskTools(options: {
         workspace: args.workspace,
         goal: args.goal,
         lead: args.lead,
+        template: args.template,
+        budget: args.budget,
+        coordinator: {
+          enabled: Boolean(args.autoStart || args.autoMerge),
+          autoStart: Boolean(args.autoStart),
+          autoMerge: Boolean(args.autoMerge),
+          phase: "idle"
+        },
         members: args.members
       });
       return {
@@ -732,13 +1150,26 @@ export function createTaskTools(options: {
       };
     },
 
+    async teamTaskStartTool(args: TeamTaskStartArgs): Promise<CallToolResult> {
+      return startTeamTask(args);
+    },
+
     async teamStatusTool(args: TeamStatusArgs): Promise<CallToolResult> {
       if (!args.teamId) return errorResult("teamId is required");
-      const team = teamStore.get(args.teamId);
+      const team = syncLinkedTeamTasks(teamStore.get(args.teamId));
       if (!team) return errorResult(`Team not found: ${args.teamId}`);
+      const linkedTasks = linkedTasksFor(team);
       return {
         content: [{ type: "text", text: formatTeam(team) }],
-        structuredContent: { ok: true, team }
+        structuredContent: { ok: true, team, linkedTasks }
+      };
+    },
+
+    async teamListTool(): Promise<CallToolResult> {
+      const teams = teamStore.list().map(team => syncLinkedTeamTasks(team) ?? team);
+      return {
+        content: [{ type: "text", text: teams.length === 0 ? "No teams." : teams.map(formatTeam).join("\n\n") }],
+        structuredContent: { ok: true, teams, linkedTasks: teams.flatMap(linkedTasksFor) }
       };
     },
 
@@ -1213,6 +1644,77 @@ function validateTeamMessageArgs(args: TeamMessageArgs): string | undefined {
   if (!args.from) return "from is required";
   if (!args.body) return "body is required";
   return undefined;
+}
+
+function buildTeamTaskRequest(team: AgentTeam, task: TeamTask, overrideRequest?: string): string {
+  return [
+    "Execute the assigned Team Mode task only.",
+    "",
+    `Team: ${team.id}`,
+    `Team goal: ${team.goal}`,
+    `Workspace: ${team.workspace}`,
+    `Assigned task: ${task.id}`,
+    `Title: ${task.title}`,
+    task.description ? `Description: ${task.description}` : undefined,
+    task.assignee ? `Assignee: ${task.assignee}` : undefined,
+    overrideRequest ? `Extra instructions: ${overrideRequest}` : undefined,
+    "",
+    "Do not work on unrelated team tasks. Report what changed, what was verified, and any blocker."
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function teamStatusForDelegatedTask(task: DelegatedTask): TeamTaskStatus {
+  if (task.status === "completed") return "done";
+  if (task.status === "failed" || task.status === "interrupted") return "blocked";
+  if (task.status === "cancelled") return "cancelled";
+  return "in_progress";
+}
+
+function validateTeamBudgetForStart(team: AgentTeam, preferredAgent: AgentName | undefined, manager: TaskManager): string | undefined {
+  const budget = team.budget;
+  if (!budget) return undefined;
+  if (preferredAgent && budget.allowedAgents && !budget.allowedAgents.includes(preferredAgent)) {
+    return `preferredAgent ${preferredAgent} is not allowed by team budget`;
+  }
+  if (budget.maxTasks !== undefined && team.tasks.length > budget.maxTasks) {
+    return `team task count ${team.tasks.length} exceeds budget maxTasks ${budget.maxTasks}`;
+  }
+  if (budget.maxRuntimeMs !== undefined) {
+    const created = Date.parse(team.createdAt);
+    if (Number.isFinite(created) && Date.now() - created > budget.maxRuntimeMs) {
+      return `team runtime exceeds budget maxRuntimeMs ${budget.maxRuntimeMs}`;
+    }
+  }
+  if (budget.maxRunning !== undefined) {
+    const running = team.tasks
+      .map(task => task.linkedTaskId ? manager.get(task.linkedTaskId) : undefined)
+      .filter((task): task is DelegatedTask => task !== undefined && (task.status === "running" || task.status === "pending"))
+      .length;
+    if (running >= budget.maxRunning) return `team running task budget reached: ${running}/${budget.maxRunning}`;
+  }
+  return undefined;
+}
+
+function buildMergerTaskDescription(team: AgentTeam): string {
+  const completed = team.tasks
+    .filter(task => task.status === "done")
+    .map(task => `- ${task.id}: ${task.title}${task.linkedTaskId ? ` (${task.linkedTaskId})` : ""}`)
+    .join("\n");
+  return [
+    "Merge and stabilize the completed Team Mode work.",
+    "",
+    "Completed tasks:",
+    completed || "- none",
+    "",
+    "Resolve integration conflicts, remove duplicate implementations, keep the final code coherent, and summarize verification gaps."
+  ].join("\n");
+}
+
+function phaseForTeam(team: AgentTeam): "idle" | "running" | "merging" | "completed" | "blocked" {
+  if (team.tasks.some(task => task.status === "blocked")) return "blocked";
+  if (team.tasks.some(task => task.status === "in_progress")) return team.coordinator?.mergerTaskId ? "merging" : "running";
+  if (team.tasks.length > 0 && team.tasks.every(task => task.status === "done" || task.status === "cancelled")) return "completed";
+  return "idle";
 }
 
 function validateDelegateArgs(args: DelegateTaskArgs, registry = new AgentRegistry()): string | undefined {

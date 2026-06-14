@@ -12,6 +12,13 @@ const agentSchema = z.enum(["claude", "codex", "codex-cli", "gemini", "opencode"
 const modeSchema = z.enum(["sync", "background"]).optional();
 const autoDispatchStrategySchema = z.enum(["auto", "direct", "plan"]).optional();
 const teamTaskStatusSchema = z.enum(["todo", "in_progress", "done", "blocked", "cancelled"]).optional();
+const teamBudgetSchema = z.object({
+  maxRunning: z.number().int().positive().optional(),
+  maxTasks: z.number().int().positive().optional(),
+  maxRuntimeMs: z.number().int().positive().optional(),
+  maxRepairAttempts: z.number().int().min(0).optional(),
+  allowedAgents: z.array(z.enum(["claude", "codex", "codex-cli", "gemini", "opencode", "myflicker"])).optional()
+}).optional();
 const commandToolInputSchema = {
   workspace: z.string().min(1).describe("Absolute workspace path where the task should run."),
   request: z.string().min(1).describe("Natural-language task request."),
@@ -336,6 +343,22 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "team_templates",
+    {
+      title: "Team templates",
+      description: "List built-in Team Mode templates such as bugfix-team, frontend-team, backend-team, research-team, large-refactor-team, and release-team.",
+      inputSchema: {},
+      annotations: {
+        title: "Team templates",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.teamTemplatesTool()
+  );
+
+  server.registerTool(
     "team_create",
     {
       title: "Create agent team",
@@ -345,6 +368,10 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
         workspace: z.string().min(1).describe("Absolute workspace path for this team."),
         goal: z.string().min(1).describe("The team's overall goal."),
         lead: z.string().optional().describe("Lead member id. Defaults to lead."),
+        template: z.string().optional().describe("Optional template label for this team."),
+        autoStart: z.boolean().optional().describe("Whether the coordinator should auto-start team tasks."),
+        autoMerge: z.boolean().optional().describe("Whether the coordinator should create a merger task after base tasks finish."),
+        budget: teamBudgetSchema.describe("Optional team budget and safety policy."),
         members: z.array(z.object({
           id: z.string().optional(),
           role: z.string().min(1),
@@ -361,6 +388,51 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
       }
     },
     async args => taskTools.teamCreateTool(args)
+  );
+
+  server.registerTool(
+    "team_create_from_template",
+    {
+      title: "Create team from template",
+      description: "Create a Team Mode workspace from a built-in template with preset members, shared tasks, budget, and coordinator settings.",
+      inputSchema: {
+        teamId: z.string().optional().describe("Optional stable team id."),
+        template: z.string().min(1).describe("Template name, for example bugfix-team or frontend-team."),
+        workspace: z.string().min(1).describe("Absolute workspace path for this team."),
+        goal: z.string().min(1).describe("The team's overall goal."),
+        autoStart: z.boolean().optional().describe("Run the coordinator immediately and start tasks."),
+        autoMerge: z.boolean().optional().describe("Create and start a merger task after base tasks finish."),
+        budget: teamBudgetSchema.describe("Optional budget override.")
+      },
+      annotations: {
+        title: "Create team from template",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamCreateFromTemplateTool(args)
+  );
+
+  server.registerTool(
+    "team_coordinator_run",
+    {
+      title: "Run team coordinator",
+      description: "Run one Team Mode coordinator tick: sync linked task status, auto-start eligible tasks within budget, and optionally create/start a merger task.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        autoStart: z.boolean().optional().describe("Override whether to start todo tasks."),
+        autoMerge: z.boolean().optional().describe("Override whether to create/start a merger task."),
+        maxStarts: z.number().int().min(0).optional().describe("Maximum team tasks to start in this tick.")
+      },
+      annotations: {
+        title: "Run team coordinator",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamCoordinatorRunTool(args)
   );
 
   server.registerTool(
@@ -450,6 +522,36 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "team_task_start",
+    {
+      title: "Start team task",
+      description: "Start a delegated background agent task from a Team Mode task and link the delegated task id back to the shared task board.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        taskId: z.string().min(1).describe("Team task id."),
+        stage: stageSchema.optional().describe("Stage to run. Defaults to assignee profile stages or implementation."),
+        profile: z.string().optional().describe("Override assignee profile."),
+        preferredAgent: agentSchema.optional().describe("Override assignee agent."),
+        mode: modeSchema.describe("Execution mode. Defaults to background."),
+        request: z.string().optional().describe("Extra instructions for this run."),
+        verifyCommand: z.string().optional().describe("Optional verification command."),
+        model: z.string().optional().describe("Optional provider model override."),
+        effort: z.string().optional().describe("Optional reasoning effort."),
+        timeoutMs: z.number().int().positive().optional().describe("Timeout in milliseconds."),
+        maxRepairAttempts: z.number().int().min(0).optional().describe("Automatic repair attempts when verification fails."),
+        loadSkills: z.array(z.string()).optional().describe("Configured skills to inject.")
+      },
+      annotations: {
+        title: "Start team task",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamTaskStartTool(args as Parameters<TaskToolSet["teamTaskStartTool"]>[0])
+  );
+
+  server.registerTool(
     "team_status",
     {
       title: "Team status",
@@ -465,6 +567,22 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
       }
     },
     async args => taskTools.teamStatusTool(args)
+  );
+
+  server.registerTool(
+    "team_list",
+    {
+      title: "List teams",
+      description: "List persisted Team Mode workspaces.",
+      inputSchema: {},
+      annotations: {
+        title: "List teams",
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async () => taskTools.teamListTool()
   );
 
   server.registerTool(

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 import { stat } from "node:fs/promises";
 import { artifactPaths, readBackgroundOutput } from "../mcp/backgroundOutput.js";
-import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet } from "../mcp/tools.js";
+import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet, TeamCoordinatorRunArgs, TeamCreateArgs, TeamCreateFromTemplateArgs, TeamMessageArgs, TeamTaskCreateArgs, TeamTaskStartArgs, TeamTaskUpdateArgs } from "../mcp/tools.js";
 import type { StabilityRunner, StabilityRunInput } from "../stability/StabilityRunner.js";
 import type { DelegatedTask, StageResult, TaskRuntimeSnapshot, TaskStatus } from "../types.js";
 import { changedFiles } from "../utils/git.js";
@@ -119,6 +119,89 @@ async function routeRequest(
       liveStabilityRunner: Boolean(context.stabilityRunner)
     });
     return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/teams") {
+    if (!context.taskTools) {
+      sendJson(response, 200, { ok: true, teams: [] });
+      return;
+    }
+    const result = await context.taskTools.teamListTool();
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/team-templates") {
+    if (!context.taskTools) {
+      sendJson(response, 200, { ok: true, templates: [] });
+      return;
+    }
+    const result = await context.taskTools.teamTemplatesTool();
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/teams/from-template") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.teamCreateFromTemplateTool(await readJsonBody(request) as unknown as TeamCreateFromTemplateArgs);
+    sendToolResult(response, result);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/teams") {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const result = await context.taskTools.teamCreateTool(await readJsonBody(request) as unknown as TeamCreateArgs);
+    sendToolResult(response, result);
+    return;
+  }
+  if (url.pathname.startsWith("/api/teams/")) {
+    if (!context.taskTools) {
+      sendJson(response, 409, { ok: false, error: "Dashboard is not attached to live task tools." });
+      return;
+    }
+    const parts = url.pathname.slice("/api/teams/".length).split("/");
+    const teamId = decodeURIComponent(parts[0] ?? "");
+    if (!teamId) {
+      sendJson(response, 400, { ok: false, error: "teamId is required" });
+      return;
+    }
+    if (request.method === "GET" && parts.length === 1) {
+      const result = await context.taskTools.teamStatusTool({ teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "coordinator-run") {
+      const body = await readJsonBody(request) as unknown as Omit<TeamCoordinatorRunArgs, "teamId">;
+      const result = await context.taskTools.teamCoordinatorRunTool({ ...body, teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "messages") {
+      const body = await readJsonBody(request) as unknown as Omit<TeamMessageArgs, "teamId">;
+      const result = await context.taskTools.teamSendMessageTool({ ...body, teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "tasks" && parts.length === 2) {
+      const body = await readJsonBody(request) as unknown as Omit<TeamTaskCreateArgs, "teamId">;
+      const result = await context.taskTools.teamTaskCreateTool({ ...body, teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "tasks" && parts[2] && parts[3] === "start") {
+      const body = await readJsonBody(request) as unknown as Omit<TeamTaskStartArgs, "teamId" | "taskId">;
+      const result = await context.taskTools.teamTaskStartTool({ ...body, teamId, taskId: decodeURIComponent(parts[2]) });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "tasks" && parts[2]) {
+      const body = await readJsonBody(request) as unknown as Omit<TeamTaskUpdateArgs, "teamId" | "taskId">;
+      const result = await context.taskTools.teamTaskUpdateTool({ ...body, teamId, taskId: decodeURIComponent(parts[2]) });
+      sendToolResult(response, result);
+      return;
+    }
   }
   if (request.method === "GET" && url.pathname === "/api/stability-runs") {
     if (!context.stabilityRunner) {
@@ -615,6 +698,37 @@ const DASHBOARD_HTML = `<!doctype html>
       </form>
       <div id="stability-runs" class="stability-runs"></div>
     </section>
+    <section class="team-panel advanced-only" id="team-panel" hidden>
+      <div class="panel-head">
+        <h2>Team Mode</h2>
+        <span class="meta">Shared agent messages and task board</span>
+      </div>
+      <form id="team-form" class="workflow-form">
+        <div class="form-row">
+          <label>Workspace<input id="team-workspace" placeholder="/absolute/path/to/project" required></label>
+          <label>Lead<input id="team-lead" value="lead" placeholder="lead"></label>
+          <label>Template<select id="team-template"><option value="">Custom team</option></select></label>
+        </div>
+        <div class="form-row">
+          <label>Members<input id="team-members" value="planner:claude,coder:claude,reviewer:codex-cli" placeholder="planner:claude,coder:claude"></label>
+          <label>Max running<input id="team-max-running" type="number" min="1" step="1" placeholder="template default"></label>
+          <label>Max tasks<input id="team-max-tasks" type="number" min="1" step="1" placeholder="template default"></label>
+        </div>
+        <label class="request-field">Goal<textarea id="team-goal" rows="2" placeholder="Describe the team goal" required></textarea></label>
+        <div class="team-options">
+          <label><input id="team-auto-start" type="checkbox">Auto start</label>
+          <label><input id="team-auto-merge" type="checkbox" checked>Auto merge</label>
+        </div>
+        <div class="form-actions">
+          <button id="team-submit" type="submit">Create team</button>
+          <span id="team-status" class="form-status"></span>
+        </div>
+      </form>
+      <div class="team-layout">
+        <div id="teams" class="team-list"></div>
+        <div id="team-detail" class="team-detail"><span class="meta">Select a team to inspect members, messages, and shared tasks.</span></div>
+      </div>
+    </section>
     <section class="metrics" id="metrics"></section>
     <section class="workspace">
       <aside class="task-list" aria-label="Tasks">
@@ -692,7 +806,7 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 .form-actions { display: flex; align-items: center; gap: 10px; }
 #workflow-submit { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
 .form-status { color: var(--muted); font-size: 13px; }
-.catalog, .providers, .stability, .task-preview { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.catalog, .providers, .stability, .task-preview, .team-panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
 .task-preview { align-content: start; }
 .preview-content { display: grid; gap: 10px; }
 .preview-risk { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 700; text-transform: capitalize; background: #eef2f7; color: var(--muted); }
@@ -804,6 +918,28 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .provider-summary-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fff; display: grid; gap: 4px; }
 .stability-task-list { display: grid; gap: 6px; margin-top: 8px; }
 .stability-task { display: grid; grid-template-columns: 96px 90px minmax(0, 1fr) 80px; gap: 8px; align-items: center; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; }
+.team-layout { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 12px; min-width: 0; }
+.team-options { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.team-options label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 650; }
+.team-options input { width: 14px; height: 14px; accent-color: var(--accent); }
+.team-list, .team-detail { min-width: 0; }
+.team-list { display: grid; gap: 8px; align-content: start; }
+.team-row { width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 10px; cursor: pointer; display: grid; gap: 5px; }
+.team-row:hover, .team-row.active { border-color: var(--accent); background: #f0fdfa; }
+.team-detail { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 12px; display: grid; gap: 12px; }
+.team-section { display: grid; gap: 8px; }
+.team-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.team-card, .team-message, .team-task { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 9px; display: grid; gap: 4px; min-width: 0; }
+.team-coordinator { border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.team-task.done { border-color: #bbf7d0; background: #f7fef9; }
+.team-task.in_progress { border-color: #bae6fd; background: #f0f9ff; }
+.team-task.blocked, .team-task.cancelled { border-color: #fecaca; background: #fff7f7; }
+.linked-task-chip { border: 1px solid #dbeafe; border-radius: 6px; background: #f8fbff; padding: 7px; display: grid; gap: 4px; }
+.team-task-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.team-message-list, .team-task-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.team-inline-form { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.team-inline-form input, .team-inline-form textarea, .team-inline-form select { border: 1px solid var(--line); border-radius: 6px; padding: 7px; min-width: 0; }
+.team-inline-form textarea { resize: vertical; min-height: 38px; }
 @media (max-width: 900px) {
   .shell { padding: 12px; }
   .form-row { grid-template-columns: 1fr; }
@@ -816,6 +952,7 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
   .plan-unit { grid-template-columns: 1fr; }
   .workflow-step { grid-template-columns: 88px minmax(0, 1fr); }
   .workflow-step-body { grid-column: 1 / -1; }
+  .team-layout, .team-inline-form { grid-template-columns: 1fr; }
 }
 
 :root {
@@ -840,7 +977,7 @@ h1 { font-size: 22px; letter-spacing: 0; }
 .mode-button.active { background: #14b8a6; color: #082f49; font-weight: 700; }
 #refresh { background: #f8fafc; border-color: #dbe3ee; color: #172033; }
 .launch-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 0.9fr); gap: 14px; align-items: stretch; }
-.new-task, .providers, .task-preview, .catalog, .metric, .task-list, .panel { border-color: var(--line); box-shadow: var(--shadow); }
+.new-task, .providers, .task-preview, .catalog, .team-panel, .metric, .task-list, .panel { border-color: var(--line); box-shadow: var(--shadow); }
 .new-task { padding: 16px; border-radius: 8px; }
 .tabbar { background: #f1f5f9; border: 1px solid #dbe3ee; border-radius: 8px; padding: 4px; }
 .tab { border: 0; background: transparent; color: #475569; font-size: 13px; }
@@ -917,7 +1054,7 @@ pre { background: #0b1020; border: 1px solid #1e293b; }
 const DASHBOARD_JS = `const SIMPLE_COMMANDS = ["ultrawork", "start-work", "plan-work", "review-work", "explore"];
 const SIMPLE_COMMAND_SET = new Set(SIMPLE_COMMANDS);
 
-const state = { tasks: [], commands: [], stabilityRuns: [], projectMemoryByWorkspace: {}, mode: "simple", selectedTaskId: undefined, filter: "", showChildren: false, selectedIoTab: undefined, lastPreview: undefined, capabilities: { liveTaskManager: false, liveTaskTools: false, liveStabilityRunner: false } };
+const state = { tasks: [], teams: [], teamTemplates: [], commands: [], stabilityRuns: [], projectMemoryByWorkspace: {}, mode: "simple", selectedTaskId: undefined, selectedTeamId: undefined, filter: "", showChildren: false, selectedIoTab: undefined, lastPreview: undefined, capabilities: { liveTaskManager: false, liveTaskTools: false, liveStabilityRunner: false } };
 
 const els = {
   workflowPanel: document.getElementById("workflow-panel"),
@@ -932,6 +1069,21 @@ const els = {
   stabilitySubmit: document.getElementById("stability-submit"),
   stabilityStatus: document.getElementById("stability-status"),
   stabilityRuns: document.getElementById("stability-runs"),
+  teamPanel: document.getElementById("team-panel"),
+  teamForm: document.getElementById("team-form"),
+  teamWorkspace: document.getElementById("team-workspace"),
+  teamGoal: document.getElementById("team-goal"),
+  teamLead: document.getElementById("team-lead"),
+  teamTemplate: document.getElementById("team-template"),
+  teamMembers: document.getElementById("team-members"),
+  teamMaxRunning: document.getElementById("team-max-running"),
+  teamMaxTasks: document.getElementById("team-max-tasks"),
+  teamAutoStart: document.getElementById("team-auto-start"),
+  teamAutoMerge: document.getElementById("team-auto-merge"),
+  teamSubmit: document.getElementById("team-submit"),
+  teamStatus: document.getElementById("team-status"),
+  teams: document.getElementById("teams"),
+  teamDetail: document.getElementById("team-detail"),
   providers: document.getElementById("providers"),
   taskPreview: document.getElementById("task-preview"),
   taskPreviewStatus: document.getElementById("task-preview-status"),
@@ -978,6 +1130,7 @@ const els = {
 els.refresh.addEventListener("click", () => {
   loadTasks();
   loadStabilityRuns();
+  loadTeams();
 });
 els.simpleMode.addEventListener("click", () => setMode("simple"));
 els.advancedMode.addEventListener("click", () => setMode("advanced"));
@@ -996,6 +1149,10 @@ els.form.addEventListener("submit", event => {
 els.stabilityForm.addEventListener("submit", event => {
   event.preventDefault();
   submitStabilityRun();
+});
+els.teamForm.addEventListener("submit", event => {
+  event.preventDefault();
+  submitTeam();
 });
 for (const field of els.form.querySelectorAll("input, textarea, select")) {
   field.addEventListener("input", scheduleTaskPreview);
@@ -1217,12 +1374,292 @@ async function loadCapabilities() {
   els.taskPreview.hidden = !data.liveTaskTools;
   els.catalog.hidden = !data.liveTaskTools;
   els.providers.hidden = !data.liveTaskTools;
+  els.teamPanel.hidden = !data.liveTaskTools;
   els.stabilityPanel.hidden = !data.liveStabilityRunner;
   if (data.liveTaskTools) await loadProviders();
   if (data.liveTaskTools) await loadCatalog();
   if (data.liveTaskTools) await loadCommands();
+  if (data.liveTaskTools) await loadTeamTemplates();
+  if (data.liveTaskTools) await loadTeams();
   if (data.liveTaskTools) scheduleTaskPreview();
   if (data.liveStabilityRunner) await loadStabilityRuns();
+}
+
+async function submitTeam() {
+  const workspace = els.teamWorkspace.value.trim() || els.workspace.value.trim();
+  const goal = els.teamGoal.value.trim() || els.request.value.trim();
+  const lead = els.teamLead.value.trim() || "lead";
+  const members = parseTeamMembers(els.teamMembers.value);
+  const template = els.teamTemplate.value;
+  const maxRunning = Number(els.teamMaxRunning.value);
+  const maxTasks = Number(els.teamMaxTasks.value);
+  const budget = {};
+  if (Number.isInteger(maxRunning) && maxRunning > 0) budget.maxRunning = maxRunning;
+  if (Number.isInteger(maxTasks) && maxTasks > 0) budget.maxTasks = maxTasks;
+  els.teamStatus.textContent = "Creating...";
+  els.teamSubmit.disabled = true;
+  try {
+    const response = await fetch(template ? "/api/teams/from-template" : "/api/teams", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        workspace,
+        goal,
+        lead,
+        members: template ? undefined : members,
+        template: template || undefined,
+        autoStart: els.teamAutoStart.checked,
+        autoMerge: els.teamAutoMerge.checked,
+        budget: Object.keys(budget).length > 0 ? budget : undefined
+      })
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Failed to create team");
+    state.selectedTeamId = data.team?.id;
+    els.teamStatus.textContent = "Team " + state.selectedTeamId + " created";
+    await loadTeams();
+  } catch (error) {
+    els.teamStatus.textContent = error.message || String(error);
+  } finally {
+    els.teamSubmit.disabled = false;
+  }
+}
+
+async function loadTeamTemplates() {
+  const response = await fetch("/api/team-templates");
+  const data = await response.json();
+  state.teamTemplates = data.templates || [];
+  els.teamTemplate.innerHTML = '<option value="">Custom team</option>' + state.teamTemplates.map(template =>
+    '<option value="' + escapeAttr(template.name) + '">' + escapeHtml(template.name) + '</option>'
+  ).join("");
+}
+
+function parseTeamMembers(value) {
+  return String(value || "")
+    .split(",")
+    .map(item => item.trim())
+    .filter(Boolean)
+    .map((item, index) => {
+      const [role, agentOrProfile] = item.split(":").map(part => part.trim());
+      const member = { id: role || "member-" + String(index + 1), role: role || "member" };
+      if (agentOrProfile && ["claude", "codex", "codex-cli", "gemini", "opencode", "myflicker"].includes(agentOrProfile)) member.agent = agentOrProfile;
+      else if (agentOrProfile) member.profile = agentOrProfile;
+      return member;
+    });
+}
+
+async function loadTeams() {
+  if (!state.capabilities.liveTaskTools) return;
+  const response = await fetch("/api/teams");
+  const data = await response.json();
+  state.teams = data.teams || [];
+  if (!state.selectedTeamId && state.teams.length > 0) state.selectedTeamId = state.teams[0].id;
+  renderTeams();
+  if (state.selectedTeamId) await loadTeamDetail(state.selectedTeamId);
+}
+
+function renderTeams() {
+  if (!els.teams) return;
+  if (state.teams.length === 0) {
+    els.teams.innerHTML = '<span class="meta">No teams yet.</span>';
+    els.teamDetail.innerHTML = '<span class="meta">Create a team to coordinate agent messages and shared tasks.</span>';
+    return;
+  }
+  els.teams.innerHTML = state.teams.map(team => \`
+    <button class="team-row \${team.id === state.selectedTeamId ? "active" : ""}" type="button" data-team-id="\${escapeAttr(team.id)}">
+      <strong>\${escapeHtml(team.goal || team.id)}</strong>
+      <span class="meta">\${escapeHtml(team.workspace || "")}</span>
+      <span class="meta">\${escapeHtml(String((team.members || []).length))} members / \${escapeHtml(String((team.tasks || []).length))} tasks / \${escapeHtml(String((team.messages || []).length))} messages</span>
+    </button>
+  \`).join("");
+  for (const button of els.teams.querySelectorAll("[data-team-id]")) {
+    button.addEventListener("click", () => loadTeamDetail(button.dataset.teamId));
+  }
+}
+
+async function loadTeamDetail(teamId) {
+  state.selectedTeamId = teamId;
+  renderTeams();
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId));
+  const data = await response.json();
+  if (!data.ok) {
+    els.teamDetail.innerHTML = '<span class="meta">' + escapeHtml(data.error || "Failed to load team") + '</span>';
+    return;
+  }
+  renderTeamDetail(data.team, data.linkedTasks || []);
+}
+
+function renderTeamDetail(team, linkedTasks) {
+  const members = team.members || [];
+  const messages = team.messages || [];
+  const tasks = team.tasks || [];
+  const linkedTaskById = new Map((linkedTasks || []).map(task => [task.id, task]));
+  els.teamDetail.innerHTML = \`
+    <div class="team-section">
+      <div class="panel-head"><h3>\${escapeHtml(team.id)}</h3><span class="meta">\${escapeHtml(team.updatedAt || "")}</span></div>
+      \${kv("Goal", team.goal || "")}
+      \${kv("Workspace", team.workspace || "")}
+      \${kv("Lead", team.lead || "")}
+      \${kv("Template", team.template || "")}
+      \${renderTeamBudget(team.budget)}
+      \${renderTeamCoordinator(team)}
+    </div>
+    <div class="team-section">
+      <h3>Members</h3>
+      <div class="team-card-grid">\${members.map(member => \`
+        <div class="team-card">
+          <strong>\${escapeHtml(member.id || member.role)}</strong>
+          <span class="meta">\${escapeHtml([member.role, member.profile, member.agent, member.status].filter(Boolean).join(" / "))}</span>
+        </div>
+      \`).join("") || '<span class="meta">No members.</span>'}</div>
+    </div>
+    <div class="team-section">
+      <h3>Messages</h3>
+      <form class="team-inline-form" data-team-message-form>
+        <select name="from">\${members.map(member => '<option value="' + escapeAttr(member.id) + '">' + escapeHtml(member.id) + '</option>').join("")}<option value="lead">lead</option></select>
+        <textarea name="body" placeholder="Message to the team"></textarea>
+        <button class="secondary-button" type="submit">Send</button>
+      </form>
+      <div class="team-message-list">\${messages.slice().reverse().slice(0, 20).map(message => \`
+        <div class="team-message">
+          <strong>\${escapeHtml(message.from)} → \${escapeHtml(message.to || "all")}</strong>
+          <span>\${escapeHtml(message.body || "")}</span>
+          <span class="meta">\${escapeHtml(message.createdAt || "")}\${message.taskId ? " / " + escapeHtml(message.taskId) : ""}</span>
+        </div>
+      \`).join("") || '<span class="meta">No messages.</span>'}</div>
+    </div>
+    <div class="team-section">
+      <h3>Shared tasks</h3>
+      <form class="team-inline-form" data-team-task-form>
+        <select name="assignee"><option value="">Unassigned</option>\${members.map(member => '<option value="' + escapeAttr(member.id) + '">' + escapeHtml(member.id) + '</option>').join("")}</select>
+        <input name="title" placeholder="Task title">
+        <button class="secondary-button" type="submit">Add task</button>
+      </form>
+      <div class="team-task-list">\${tasks.map(task => \`
+        <div class="team-task \${escapeAttr(task.status || "")}">
+          <div class="panel-head"><strong>\${escapeHtml(task.title || task.id)}</strong><span class="status \${escapeAttr(task.status || "")}">\${escapeHtml(task.status || "todo")}</span></div>
+          <span class="meta">\${escapeHtml([task.assignee ? "@" + task.assignee : "", task.linkedTaskId ? "linked " + task.linkedTaskId : ""].filter(Boolean).join(" / "))}</span>
+          \${renderLinkedTeamTask(linkedTaskById.get(task.linkedTaskId))}
+          \${task.description ? '<span>' + escapeHtml(task.description) + '</span>' : ''}
+          <div class="team-task-actions">
+            \${task.linkedTaskId ? '<button class="secondary-button" type="button" data-open-linked-task="' + escapeAttr(task.linkedTaskId) + '">Open linked task</button>' : '<button class="secondary-button" type="button" data-start-team-task="' + escapeAttr(task.id) + '">Start agent</button>'}
+          </div>
+        </div>
+      \`).join("") || '<span class="meta">No shared tasks.</span>'}</div>
+    </div>
+  \`;
+  const messageForm = els.teamDetail.querySelector("[data-team-message-form]");
+  if (messageForm) messageForm.addEventListener("submit", event => submitTeamMessage(event, team.id));
+  const taskForm = els.teamDetail.querySelector("[data-team-task-form]");
+  if (taskForm) taskForm.addEventListener("submit", event => submitTeamTask(event, team.id));
+  const coordinatorButton = els.teamDetail.querySelector("[data-run-team-coordinator]");
+  if (coordinatorButton) coordinatorButton.addEventListener("click", () => runTeamCoordinator(team.id));
+  for (const button of els.teamDetail.querySelectorAll("[data-start-team-task]")) {
+    button.addEventListener("click", () => startTeamTask(team.id, button.dataset.startTeamTask));
+  }
+  for (const button of els.teamDetail.querySelectorAll("[data-open-linked-task]")) {
+    button.addEventListener("click", () => loadDetail(button.dataset.openLinkedTask));
+  }
+}
+
+function renderTeamBudget(budget) {
+  if (!budget) return "";
+  return kv("Budget", [
+    budget.maxRunning ? "running " + budget.maxRunning : "",
+    budget.maxTasks ? "tasks " + budget.maxTasks : "",
+    budget.maxRuntimeMs ? "runtime " + formatDuration(budget.maxRuntimeMs) : "",
+    budget.maxRepairAttempts !== undefined ? "repairs " + budget.maxRepairAttempts : "",
+    budget.allowedAgents?.length ? "agents " + budget.allowedAgents.join(", ") : ""
+  ].filter(Boolean).join(" / "));
+}
+
+function renderTeamCoordinator(team) {
+  const coordinator = team.coordinator || {};
+  return \`
+    <div class="team-coordinator">
+      <span class="status \${escapeAttr(coordinator.phase || "idle")}">\${escapeHtml(coordinator.phase || "idle")}</span>
+      <span class="meta">\${escapeHtml([coordinator.autoStart ? "auto-start" : "", coordinator.autoMerge ? "auto-merge" : "", coordinator.lastAction || ""].filter(Boolean).join(" / "))}</span>
+      <button class="secondary-button" type="button" data-run-team-coordinator>Run coordinator</button>
+    </div>
+  \`;
+}
+
+async function runTeamCoordinator(teamId) {
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/coordinator-run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ autoStart: true, autoMerge: true })
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Failed to run team coordinator");
+    return;
+  }
+  await loadTeams();
+  await loadTasks();
+}
+
+function renderLinkedTeamTask(task) {
+  if (!task) return "";
+  const summary = task.resultSummary?.summary || "";
+  const runtime = task.runtime?.durationMs ? formatDuration(task.runtime.durationMs) : "";
+  return \`
+    <div class="linked-task-chip">
+      <span class="status \${escapeAttr(task.status || "")}">\${escapeHtml(task.status || "unknown")}</span>
+      <span class="meta">\${escapeHtml([task.preferredAgent || task.profile, runtime, task.updatedAt ? "updated " + formatTime(task.updatedAt) : ""].filter(Boolean).join(" / "))}</span>
+      \${summary ? '<span class="meta">' + escapeHtml(truncateText(summary, 160)) + '</span>' : ''}
+    </div>
+  \`;
+}
+
+async function submitTeamMessage(event, teamId) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const fromInput = form.querySelector("[name='from']");
+  const bodyInput = form.querySelector("[name='body']");
+  const body = bodyInput.value.trim();
+  if (!body) return;
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ from: fromInput.value || "lead", body })
+  });
+  const data = await response.json();
+  if (!data.ok) alert(data.error || "Failed to send message");
+  await loadTeams();
+}
+
+async function submitTeamTask(event, teamId) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const titleInput = form.querySelector("[name='title']");
+  const assigneeInput = form.querySelector("[name='assignee']");
+  const title = titleInput.value.trim();
+  if (!title) return;
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title, assignee: assigneeInput.value || undefined })
+  });
+  const data = await response.json();
+  if (!data.ok) alert(data.error || "Failed to create team task");
+  await loadTeams();
+}
+
+async function startTeamTask(teamId, taskId) {
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/tasks/" + encodeURIComponent(taskId) + "/start", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "background" })
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Failed to start team task");
+    return;
+  }
+  await loadTeams();
+  await loadTasks();
+  if (data.delegatedTaskId) await loadDetail(data.delegatedTaskId);
 }
 
 async function submitStabilityRun() {

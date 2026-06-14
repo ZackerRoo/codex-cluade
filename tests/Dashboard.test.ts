@@ -12,6 +12,7 @@ import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
 import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
 import { TaskManager } from "../src/workflow/TaskManager.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
+import { TeamStore } from "../src/workflow/TeamStore.js";
 import { StabilityRunner, StabilityRunStore } from "../src/stability/StabilityRunner.js";
 
 describe("dashboard server", () => {
@@ -85,6 +86,11 @@ describe("dashboard server", () => {
     assert.match(html, /workflow-verify-command/);
     assert.match(html, /workflow-max-repair-attempts/);
     assert.match(html, /stability-panel/);
+    assert.match(html, /team-panel/);
+    assert.match(html, /Team Mode/);
+    assert.match(html, /team-template/);
+    assert.match(html, /team-auto-start/);
+    assert.match(html, /team-auto-merge/);
     assert.match(html, /show-child-tasks/);
     assert.match(html, /Show child tasks/);
   });
@@ -144,6 +150,15 @@ describe("dashboard server", () => {
     assert.match(js, /Project memory/);
     assert.match(js, /renderProjectMemoryPanel/);
     assert.match(js, /\/api\/project-memory/);
+    assert.match(js, /\/api\/teams/);
+    assert.match(js, /renderTeamDetail/);
+    assert.match(js, /submitTeamMessage/);
+    assert.match(js, /submitTeamTask/);
+    assert.match(js, /startTeamTask/);
+    assert.match(js, /Start agent/);
+    assert.match(js, /loadTeamTemplates/);
+    assert.match(js, /runTeamCoordinator/);
+    assert.match(js, /Run coordinator/);
   });
 
   it("serves dashboard code that preserves task detail scroll during auto-refresh", async () => {
@@ -536,6 +551,190 @@ describe("dashboard server", () => {
       assert.equal(data.ok, true);
       assert.ok(data.taskId);
       assert.equal(data.task?.retryOf, "dashboard-retry-source");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("manages Team Mode through the live dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-store-"));
+    const tools = createTaskTools({ teamStore: new TeamStore({ rootDir: join(root, "teams") }) });
+    const liveServer = createDashboardServer({ taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      const createResponse = await fetch(`${liveBaseUrl}/api/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          teamId: "dashboard-team",
+          workspace: "/tmp/project",
+          goal: "Coordinate a bug fix",
+          lead: "lead",
+          members: [
+            { id: "planner", role: "planning", agent: "claude" },
+            { id: "coder", role: "implementation", agent: "codex-cli" }
+          ]
+        })
+      });
+      const created = await createResponse.json() as { ok?: boolean; team?: { id?: string } };
+      assert.equal(createResponse.status, 200);
+      assert.equal(created.ok, true);
+      assert.equal(created.team?.id, "dashboard-team");
+
+      const messageResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-team/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "planner", to: "coder", body: "Please implement the planned fix." })
+      });
+      const message = await messageResponse.json() as { ok?: boolean; message?: { body?: string } };
+      assert.equal(messageResponse.status, 200);
+      assert.equal(message.ok, true);
+      assert.match(message.message?.body ?? "", /planned fix/);
+
+      const taskResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-team/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Implement fix", assignee: "coder" })
+      });
+      const task = await taskResponse.json() as { ok?: boolean; task?: { id?: string } };
+      assert.equal(taskResponse.status, 200);
+      assert.equal(task.ok, true);
+      assert.equal(task.task?.id, "dashboard-team-task-1");
+
+      const updateResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-team/tasks/dashboard-team-task-1`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "in_progress", linkedTaskId: "delegate-dashboard" })
+      });
+      const updated = await updateResponse.json() as { ok?: boolean; task?: { status?: string; linkedTaskId?: string } };
+      assert.equal(updateResponse.status, 200);
+      assert.equal(updated.ok, true);
+      assert.equal(updated.task?.status, "in_progress");
+      assert.equal(updated.task?.linkedTaskId, "delegate-dashboard");
+
+      const listResponse = await fetch(`${liveBaseUrl}/api/teams`);
+      const list = await listResponse.json() as { ok?: boolean; teams?: Array<{ id?: string; messages?: unknown[]; tasks?: unknown[] }> };
+      assert.equal(list.ok, true);
+      assert.equal(list.teams?.[0]?.id, "dashboard-team");
+      assert.equal(list.teams?.[0]?.messages?.length, 1);
+      assert.equal(list.teams?.[0]?.tasks?.length, 1);
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("creates Team Mode templates and runs the coordinator through the dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-template-"));
+    const manager = createTaskManager({
+      taskStore: new TaskStore({ rootDir: join(root, "tasks") }),
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({ code: 0, stdout: JSON.stringify({ result: "template task done" }), stderr: "", timedOut: false }),
+        getChangedFiles: async () => []
+      }
+    });
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(root, "teams") })
+    });
+    const liveServer = createDashboardServer({ taskManager: manager, taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      const templatesResponse = await fetch(`${liveBaseUrl}/api/team-templates`);
+      const templates = await templatesResponse.json() as { ok?: boolean; templates?: Array<{ name?: string }> };
+      assert.equal(templates.ok, true);
+      assert.ok(templates.templates?.some(template => template.name === "frontend-team"));
+
+      const createResponse = await fetch(`${liveBaseUrl}/api/teams/from-template`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          teamId: "dashboard-template-team",
+          template: "bugfix-team",
+          workspace: "/tmp/project",
+          goal: "Fix dashboard template bug",
+          autoStart: false
+        })
+      });
+      const created = await createResponse.json() as { ok?: boolean; team?: { tasks?: unknown[]; coordinator?: { phase?: string } } };
+      assert.equal(createResponse.status, 200);
+      assert.equal(created.ok, true);
+      assert.equal(created.team?.tasks?.length, 3);
+      assert.equal(created.team?.coordinator?.phase, "idle");
+
+      const coordinatorResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-template-team/coordinator-run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ autoStart: true, autoMerge: true, maxStarts: 1 })
+      });
+      const coordinated = await coordinatorResponse.json() as { ok?: boolean; startedTaskIds?: string[]; team?: { coordinator?: { phase?: string } } };
+      assert.equal(coordinatorResponse.status, 200);
+      assert.equal(coordinated.ok, true);
+      assert.equal(coordinated.startedTaskIds?.length, 1);
+      assert.equal(coordinated.team?.coordinator?.phase, "running");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("starts Team Mode tasks through the live dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-start-"));
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-start-workspace-"));
+    const store = new TaskStore({ rootDir: join(root, "tasks") });
+    const manager = createTaskManager({
+      taskStore: store,
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({ code: 0, stdout: JSON.stringify({ result: "team task done" }), stderr: "", timedOut: false }),
+        getChangedFiles: async () => []
+      }
+    });
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(root, "teams") })
+    });
+    const liveServer = createDashboardServer({ taskManager: manager, taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      await fetch(`${liveBaseUrl}/api/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          teamId: "dashboard-start-team",
+          workspace,
+          goal: "Start a real delegated task",
+          members: [{ id: "coder", role: "implementation", agent: "claude" }]
+        })
+      });
+      await fetch(`${liveBaseUrl}/api/teams/dashboard-start-team/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Implement linked task", assignee: "coder" })
+      });
+
+      const startResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-start-team/tasks/dashboard-start-team-task-1/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "background" })
+      });
+      const started = await startResponse.json() as { ok?: boolean; delegatedTaskId?: string; teamTask?: { linkedTaskId?: string; status?: string } };
+      assert.equal(startResponse.status, 200);
+      assert.equal(started.ok, true);
+      assert.ok(started.delegatedTaskId);
+      assert.equal(started.teamTask?.linkedTaskId, started.delegatedTaskId);
+      assert.equal(started.teamTask?.status, "in_progress");
+
+      const taskResponse = await fetch(`${liveBaseUrl}/api/tasks/${started.delegatedTaskId}`);
+      const delegated = await taskResponse.json() as { ok?: boolean; task?: { request?: string; preferredAgent?: string } };
+      assert.equal(delegated.ok, true);
+      assert.match(delegated.task?.request ?? "", /Execute the assigned Team Mode task only/);
+      assert.equal(delegated.task?.preferredAgent, "claude");
+
+      const teamResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-start-team`);
+      const team = await teamResponse.json() as { ok?: boolean; linkedTasks?: Array<{ id?: string; status?: string }> };
+      assert.equal(team.ok, true);
+      assert.equal(team.linkedTasks?.[0]?.id, started.delegatedTaskId);
+      assert.ok(team.linkedTasks?.[0]?.status);
     } finally {
       await new Promise<void>(resolve => liveServer.close(() => resolve()));
     }

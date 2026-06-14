@@ -233,6 +233,7 @@ export interface ProjectMemory {
 
 export type TeamMemberStatus = "active" | "idle" | "done" | "blocked";
 export type TeamTaskStatus = "todo" | "in_progress" | "done" | "blocked" | "cancelled";
+export type TeamCoordinatorPhase = "idle" | "running" | "merging" | "completed" | "blocked";
 
 export interface TeamMember {
   id: string;
@@ -267,11 +268,34 @@ export interface TeamTask {
   updatedAt: string;
 }
 
+export interface TeamBudget {
+  maxRunning?: number;
+  maxTasks?: number;
+  maxRuntimeMs?: number;
+  maxRepairAttempts?: number;
+  allowedAgents?: AgentName[];
+}
+
+export interface TeamCoordinatorState {
+  enabled: boolean;
+  autoStart: boolean;
+  autoMerge: boolean;
+  phase: TeamCoordinatorPhase;
+  lastAction?: string;
+  mergerTaskId?: string;
+  reviewTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentTeam {
   id: string;
   workspace: string;
   goal: string;
   lead: string;
+  template?: string;
+  budget?: TeamBudget;
+  coordinator?: TeamCoordinatorState;
   members: TeamMember[];
   messages: TeamMessage[];
   tasks: TeamTask[];

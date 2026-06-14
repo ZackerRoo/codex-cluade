@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
+import { createTaskManager, createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
 import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
 import { TeamStore } from "../src/workflow/TeamStore.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
@@ -990,6 +990,138 @@ describe("delegate task MCP tools", () => {
     const status = await tools.teamStatusTool({ teamId: "team-tool" });
     assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Messages: 1/);
     assert.match(String(status.content[0].type === "text" ? status.content[0].text : ""), /Tasks: 1/);
+
+    const list = await tools.teamListTool();
+    assert.equal(list.structuredContent?.ok, true);
+    assert.equal(((list.structuredContent?.teams as Array<{ id?: string }> | undefined) ?? [])[0]?.id, "team-tool");
+  });
+
+  it("starts a Team Mode task as a delegated task and links it back", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-start-test-"));
+    const taskStore = new TaskStore({ rootDir: join(rootDir, "tasks") });
+    const manager = createTaskManager({
+      taskStore,
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({ code: 0, stdout: JSON.stringify({ result: "implemented team task" }), stderr: "", timedOut: false }),
+        getChangedFiles: async () => []
+      }
+    });
+    const tools = await createTestTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+
+    await tools.teamCreateTool({
+      teamId: "team-start",
+      workspace: "/tmp/project",
+      goal: "Ship a feature",
+      members: [{ id: "coder", role: "implementation", agent: "claude" }]
+    });
+    const createdTask = await tools.teamTaskCreateTool({ teamId: "team-start", title: "Implement feature", assignee: "coder" });
+    const teamTaskId = (createdTask.structuredContent?.task as { id?: string } | undefined)?.id;
+
+    const started = await tools.teamTaskStartTool({ teamId: "team-start", taskId: teamTaskId!, mode: "background" });
+
+    assert.equal(started.structuredContent?.ok, true);
+    const delegatedTaskId = (started.structuredContent as { delegatedTaskId?: string }).delegatedTaskId;
+    assert.ok(delegatedTaskId);
+    const status = await tools.teamStatusTool({ teamId: "team-start" });
+    const team = (status.structuredContent as { team?: { tasks?: Array<{ linkedTaskId?: string; status?: string }>; messages?: unknown[] } }).team;
+    assert.equal(team?.tasks?.[0]?.linkedTaskId, delegatedTaskId);
+    assert.equal(team?.tasks?.[0]?.status, "in_progress");
+    assert.equal(team?.messages?.length, 1);
+  });
+
+  it("syncs Team Mode task status from linked delegated tasks", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-sync-test-"));
+    const taskStore = new TaskStore({ rootDir: join(rootDir, "tasks") });
+    taskStore.save({
+      id: "linked-completed-task",
+      mode: "background",
+      status: "completed",
+      workspace: "/tmp/project",
+      request: "Linked completed task",
+      stages: ["implement"],
+      runId: "linked-completed-task",
+      createdAt: "2026-06-12T00:00:00.000Z",
+      updatedAt: "2026-06-12T00:00:01.000Z"
+    });
+    const tools = createTaskTools({
+      taskStore,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+    await tools.teamCreateTool({
+      teamId: "team-sync",
+      workspace: "/tmp/project",
+      goal: "Sync linked task status",
+      members: [{ id: "coder", role: "implementation", agent: "claude" }]
+    });
+    const created = await tools.teamTaskCreateTool({ teamId: "team-sync", title: "Complete linked work", assignee: "coder" });
+    const teamTaskId = (created.structuredContent?.task as { id?: string } | undefined)?.id;
+    await tools.teamTaskUpdateTool({ teamId: "team-sync", taskId: teamTaskId!, status: "in_progress", linkedTaskId: "linked-completed-task" });
+
+    const status = await tools.teamStatusTool({ teamId: "team-sync" });
+    const content = status.structuredContent as { team?: { tasks?: Array<{ status?: string }> ; messages?: unknown[] }; linkedTasks?: Array<{ id?: string; status?: string }> };
+
+    assert.equal(content.team?.tasks?.[0]?.status, "done");
+    assert.equal(content.linkedTasks?.[0]?.id, "linked-completed-task");
+    assert.equal(content.linkedTasks?.[0]?.status, "completed");
+    assert.equal(content.team?.messages?.length, 1);
+  });
+
+  it("creates Team Mode work from templates and runs the coordinator", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-template-test-"));
+    const manager = createTaskManager({
+      taskStore: new TaskStore({ rootDir: join(rootDir, "tasks") }),
+      claude: {
+        claudePath: "claude",
+        exec: async () => ({ code: 0, stdout: JSON.stringify({ result: "coordinated team task" }), stderr: "", timedOut: false }),
+        getChangedFiles: async () => []
+      }
+    });
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+
+    const templates = await tools.teamTemplatesTool();
+    assert.ok((templates.structuredContent as { templates?: Array<{ name?: string }> }).templates?.some(template => template.name === "bugfix-team"));
+
+    const created = await tools.teamCreateFromTemplateTool({
+      teamId: "template-team",
+      template: "bugfix-team",
+      workspace: "/tmp/project",
+      goal: "Fix a login bug",
+      autoStart: false
+    });
+    const team = (created.structuredContent as { team?: { tasks?: unknown[]; budget?: { maxRunning?: number } } }).team;
+    assert.equal(team?.tasks?.length, 3);
+    assert.equal(team?.budget?.maxRunning, 2);
+
+    const coordinated = await tools.teamCoordinatorRunTool({ teamId: "template-team", autoStart: true, autoMerge: true, maxStarts: 1 });
+    const coordinatedContent = coordinated.structuredContent as { startedTaskIds?: string[]; team?: { coordinator?: { phase?: string } } };
+    assert.equal(coordinatedContent.startedTaskIds?.length, 1);
+    assert.equal(coordinatedContent.team?.coordinator?.phase, "running");
+  });
+
+  it("enforces Team Mode allowed-agent budget", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-budget-test-"));
+    const tools = createTaskTools({ teamStore: new TeamStore({ rootDir }) });
+    await tools.teamCreateTool({
+      teamId: "budget-team",
+      workspace: "/tmp/project",
+      goal: "Respect budget",
+      budget: { allowedAgents: ["codex-cli"] },
+      members: [{ id: "coder", role: "implementation", agent: "claude" }]
+    });
+    const created = await tools.teamTaskCreateTool({ teamId: "budget-team", title: "Implement disallowed agent task", assignee: "coder" });
+    const taskId = (created.structuredContent?.task as { id?: string } | undefined)?.id;
+
+    const started = await tools.teamTaskStartTool({ teamId: "budget-team", taskId: taskId!, mode: "background" });
+
+    assert.equal(started.isError, true);
+    assert.match(String(started.content[0].type === "text" ? started.content[0].text : ""), /not allowed by team budget/);
   });
 });
 

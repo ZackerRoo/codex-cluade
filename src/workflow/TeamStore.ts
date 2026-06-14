@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentName, AgentTeam, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
+import type { AgentName, AgentTeam, TeamBudget, TeamCoordinatorState, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 
 export interface TeamStoreOptions {
   rootDir?: string;
@@ -12,6 +12,9 @@ export interface CreateTeamInput {
   workspace: string;
   goal: string;
   lead?: string;
+  template?: string;
+  budget?: TeamBudget;
+  coordinator?: Partial<Pick<TeamCoordinatorState, "enabled" | "autoStart" | "autoMerge" | "phase" | "lastAction">>;
   members?: Array<{
     id?: string;
     role: string;
@@ -36,6 +39,17 @@ export class TeamStore {
       workspace: input.workspace,
       goal: input.goal,
       lead: input.lead ?? "lead",
+      template: input.template,
+      budget: input.budget,
+      coordinator: {
+        enabled: input.coordinator?.enabled ?? false,
+        autoStart: input.coordinator?.autoStart ?? false,
+        autoMerge: input.coordinator?.autoMerge ?? false,
+        phase: input.coordinator?.phase ?? "idle",
+        lastAction: input.coordinator?.lastAction,
+        createdAt: now,
+        updatedAt: now
+      },
       members: (input.members ?? []).map((member, index): TeamMember => ({
         id: member.id ?? safeId(member.role || `member-${index + 1}`),
         role: member.role,
@@ -130,6 +144,26 @@ export class TeamStore {
     team.updatedAt = now;
     this.save(team);
     return task;
+  }
+
+  updateCoordinator(teamId: string, patch: Partial<Omit<TeamCoordinatorState, "createdAt">>): AgentTeam | undefined {
+    const team = this.get(teamId);
+    if (!team) return undefined;
+    const now = new Date().toISOString();
+    team.coordinator = {
+      enabled: patch.enabled ?? team.coordinator?.enabled ?? false,
+      autoStart: patch.autoStart ?? team.coordinator?.autoStart ?? false,
+      autoMerge: patch.autoMerge ?? team.coordinator?.autoMerge ?? false,
+      phase: patch.phase ?? team.coordinator?.phase ?? "idle",
+      lastAction: patch.lastAction ?? team.coordinator?.lastAction,
+      mergerTaskId: patch.mergerTaskId ?? team.coordinator?.mergerTaskId,
+      reviewTaskId: patch.reviewTaskId ?? team.coordinator?.reviewTaskId,
+      createdAt: team.coordinator?.createdAt ?? now,
+      updatedAt: now
+    };
+    team.updatedAt = now;
+    this.save(team);
+    return team;
   }
 
   save(team: AgentTeam): void {

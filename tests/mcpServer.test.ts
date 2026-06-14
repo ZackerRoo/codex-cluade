@@ -31,12 +31,17 @@ describe("mcpServer", () => {
       assert.ok(tools.tools.some(tool => tool.name === "execute_plan"));
       assert.ok(tools.tools.some(tool => tool.name === "task_status"));
       assert.ok(tools.tools.some(tool => tool.name === "background_output"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_templates"));
       assert.ok(tools.tools.some(tool => tool.name === "team_create"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_create_from_template"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_coordinator_run"));
       assert.ok(tools.tools.some(tool => tool.name === "team_send_message"));
       assert.ok(tools.tools.some(tool => tool.name === "team_inbox"));
       assert.ok(tools.tools.some(tool => tool.name === "team_task_create"));
       assert.ok(tools.tools.some(tool => tool.name === "team_task_update"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_task_start"));
       assert.ok(tools.tools.some(tool => tool.name === "team_status"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_list"));
       assert.ok(tools.tools.some(tool => tool.name === "task_list"));
       assert.ok(tools.tools.some(tool => tool.name === "agent_catalog"));
       assert.ok(tools.tools.some(tool => tool.name === "task_cancel"));

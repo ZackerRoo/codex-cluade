@@ -244,7 +244,7 @@ Background tasks return a `taskId`. Use:
 - `task_resume`: start a background retry that resumes the latest Claude session from a previous task
 - `task_rollback`: rollback git changes from a task when its checkpoint started from a clean working tree
 - `project_memory`: read the workspace project memory injected into future agent prompts
-- Team Mode tools: `team_create`, `team_send_message`, `team_inbox`, `team_task_create`, `team_task_update`, and `team_status` provide a persistent shared message bus and task board for lead/member agent coordination
+- Team Mode tools: `team_create`, `team_list`, `team_send_message`, `team_inbox`, `team_task_create`, `team_task_update`, `team_task_start`, and `team_status` provide a persistent shared message bus and task board for lead/member agent coordination
 - `agent_catalog`: list available agents, categories, and profiles
 - `provider_doctor`: check local provider CLI availability and versions
 - `command_catalog`: list slash-style command templates
@@ -263,7 +263,7 @@ Command templates:
 - `/review-work <request>`: launch a reviewer task
 - `/multi-work <request>`: launch implementation with `multi-coder` provider fallback
 
-Team Mode is a persistent coordination layer rather than a terminal UI. It stores teams under `~/.codex-claude/teams/*.json`; a lead agent can create a team, create shared tasks, send messages to one member or all members, and members can read their inbox. Use delegated background tasks for actual execution, then link their task ids back to the shared team task board with `team_task_update.linkedTaskId`.
+Team Mode is a persistent coordination layer rather than a terminal UI. It stores teams under `~/.codex-claude/teams/*.json`; a lead agent can create a team, create shared tasks, send messages to one member or all members, and members can read their inbox. The dashboard exposes Team Mode in Advanced view so users can create teams, inspect members, send messages, add shared tasks, and start a real delegated agent from a team task. `team_task_start` uses the assignee member's agent/profile by default, launches a delegated task, marks the team task `in_progress`, writes `linkedTaskId`, and records a team message. Team status reads automatically sync linked delegated task outcomes back to the team board: completed becomes `done`, failed or interrupted becomes `blocked`, cancelled becomes `cancelled`, and active tasks stay `in_progress`. The dashboard also shows the linked task status and summary inline. Use `team_task_update.linkedTaskId` when linking an existing delegated task manually.
 
 Plan-driven workflow tools:
 
