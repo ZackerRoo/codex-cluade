@@ -436,6 +436,27 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "team_round_run",
+    {
+      title: "Run team round",
+      description: "Run one Team Mode communication round and record each participant's role-aware message into the shared team timeline.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        topic: z.string().optional().describe("Optional round topic. Defaults to the team goal or coordinator action."),
+        participants: z.array(z.string()).optional().describe("Optional member ids to include. Defaults to all team members."),
+        maxParticipants: z.number().int().min(1).optional().describe("Maximum participants to include in this round.")
+      },
+      annotations: {
+        title: "Run team round",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamRoundRunTool(args)
+  );
+
+  server.registerTool(
     "team_send_message",
     {
       title: "Send team message",

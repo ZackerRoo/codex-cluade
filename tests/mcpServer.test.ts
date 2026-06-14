@@ -35,6 +35,7 @@ describe("mcpServer", () => {
       assert.ok(tools.tools.some(tool => tool.name === "team_create"));
       assert.ok(tools.tools.some(tool => tool.name === "team_create_from_template"));
       assert.ok(tools.tools.some(tool => tool.name === "team_coordinator_run"));
+      assert.ok(tools.tools.some(tool => tool.name === "team_round_run"));
       assert.ok(tools.tools.some(tool => tool.name === "team_send_message"));
       assert.ok(tools.tools.some(tool => tool.name === "team_inbox"));
       assert.ok(tools.tools.some(tool => tool.name === "team_task_create"));

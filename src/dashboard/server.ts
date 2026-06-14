@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 import { stat } from "node:fs/promises";
 import { artifactPaths, readBackgroundOutput } from "../mcp/backgroundOutput.js";
-import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet, TeamCoordinatorRunArgs, TeamCreateArgs, TeamCreateFromTemplateArgs, TeamMessageArgs, TeamTaskCreateArgs, TeamTaskStartArgs, TeamTaskUpdateArgs } from "../mcp/tools.js";
+import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet, TeamCoordinatorRunArgs, TeamCreateArgs, TeamCreateFromTemplateArgs, TeamMessageArgs, TeamRoundRunArgs, TeamTaskCreateArgs, TeamTaskStartArgs, TeamTaskUpdateArgs } from "../mcp/tools.js";
 import type { StabilityRunner, StabilityRunInput } from "../stability/StabilityRunner.js";
 import type { DelegatedTask, StageResult, TaskRuntimeSnapshot, TaskStatus } from "../types.js";
 import { changedFiles } from "../utils/git.js";
@@ -175,6 +175,12 @@ async function routeRequest(
     if (request.method === "POST" && parts[1] === "coordinator-run") {
       const body = await readJsonBody(request) as unknown as Omit<TeamCoordinatorRunArgs, "teamId">;
       const result = await context.taskTools.teamCoordinatorRunTool({ ...body, teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "round-run") {
+      const body = await readJsonBody(request) as unknown as Omit<TeamRoundRunArgs, "teamId">;
+      const result = await context.taskTools.teamRoundRunTool({ ...body, teamId });
       sendToolResult(response, result);
       return;
     }
@@ -724,6 +730,7 @@ const DASHBOARD_HTML = `<!doctype html>
           <span id="team-status" class="form-status"></span>
         </div>
       </form>
+      <label class="request-field">Round topic<textarea id="team-round-topic" rows="2" placeholder="What should the team discuss in the next round?"></textarea></label>
       <div class="team-layout">
         <div id="teams" class="team-list"></div>
         <div id="team-detail" class="team-detail"><span class="meta">Select a team to inspect members, messages, and shared tasks.</span></div>
@@ -931,12 +938,15 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .team-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
 .team-card, .team-message, .team-task { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 9px; display: grid; gap: 4px; min-width: 0; }
 .team-coordinator { border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.team-round { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 9px; display: grid; gap: 8px; }
+.team-message.compact { background: #fff; padding: 7px; }
 .team-task.done { border-color: #bbf7d0; background: #f7fef9; }
 .team-task.in_progress { border-color: #bae6fd; background: #f0f9ff; }
 .team-task.blocked, .team-task.cancelled { border-color: #fecaca; background: #fff7f7; }
 .linked-task-chip { border: 1px solid #dbeafe; border-radius: 6px; background: #f8fbff; padding: 7px; display: grid; gap: 4px; }
 .team-task-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
 .team-message-list, .team-task-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.team-section .team-round + .team-round { margin-top: 8px; }
 .team-inline-form { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 8px; align-items: end; }
 .team-inline-form input, .team-inline-form textarea, .team-inline-form select { border: 1px solid var(--line); border-radius: 6px; padding: 7px; min-width: 0; }
 .team-inline-form textarea { resize: vertical; min-height: 38px; }
@@ -1080,6 +1090,7 @@ const els = {
   teamMaxTasks: document.getElementById("team-max-tasks"),
   teamAutoStart: document.getElementById("team-auto-start"),
   teamAutoMerge: document.getElementById("team-auto-merge"),
+  teamRoundTopic: document.getElementById("team-round-topic"),
   teamSubmit: document.getElementById("team-submit"),
   teamStatus: document.getElementById("team-status"),
   teams: document.getElementById("teams"),
@@ -1505,6 +1516,10 @@ function renderTeamDetail(team, linkedTasks) {
       \${renderTeamCoordinator(team)}
     </div>
     <div class="team-section">
+      <h3>Collaboration timeline</h3>
+      \${renderTeamTimeline(messages)}
+    </div>
+    <div class="team-section">
       <h3>Members</h3>
       <div class="team-card-grid">\${members.map(member => \`
         <div class="team-card">
@@ -1554,6 +1569,8 @@ function renderTeamDetail(team, linkedTasks) {
   if (taskForm) taskForm.addEventListener("submit", event => submitTeamTask(event, team.id));
   const coordinatorButton = els.teamDetail.querySelector("[data-run-team-coordinator]");
   if (coordinatorButton) coordinatorButton.addEventListener("click", () => runTeamCoordinator(team.id));
+  const roundButton = els.teamDetail.querySelector("[data-run-team-round]");
+  if (roundButton) roundButton.addEventListener("click", () => runTeamRound(team.id));
   for (const button of els.teamDetail.querySelectorAll("[data-start-team-task]")) {
     button.addEventListener("click", () => startTeamTask(team.id, button.dataset.startTeamTask));
   }
@@ -1580,8 +1597,30 @@ function renderTeamCoordinator(team) {
       <span class="status \${escapeAttr(coordinator.phase || "idle")}">\${escapeHtml(coordinator.phase || "idle")}</span>
       <span class="meta">\${escapeHtml([coordinator.autoStart ? "auto-start" : "", coordinator.autoMerge ? "auto-merge" : "", coordinator.lastAction || ""].filter(Boolean).join(" / "))}</span>
       <button class="secondary-button" type="button" data-run-team-coordinator>Run coordinator</button>
+      <button class="secondary-button" type="button" data-run-team-round>Run team round</button>
     </div>
   \`;
+}
+
+function renderTeamTimeline(messages) {
+  if (!messages.length) return '<span class="meta">No collaboration rounds yet.</span>';
+  const groups = new Map();
+  for (const message of messages) {
+    const key = message.roundId || "manual";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(message);
+  }
+  return Array.from(groups.entries()).reverse().slice(0, 8).map(([roundId, items]) => \`
+    <div class="team-round">
+      <div class="panel-head"><strong>\${escapeHtml(roundId === "manual" ? "Manual messages" : roundId)}</strong><span class="meta">\${escapeHtml(String(items.length))} messages</span></div>
+      \${items.slice().reverse().map(message => \`
+        <div class="team-message compact">
+          <strong>\${escapeHtml(message.from)} → \${escapeHtml(message.to || "all")}</strong>
+          <span>\${escapeHtml(message.body || "")}</span>
+        </div>
+      \`).join("")}
+    </div>
+  \`).join("");
 }
 
 async function runTeamCoordinator(teamId) {
@@ -1597,6 +1636,21 @@ async function runTeamCoordinator(teamId) {
   }
   await loadTeams();
   await loadTasks();
+}
+
+async function runTeamRound(teamId) {
+  const topic = els.teamRoundTopic.value.trim();
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/round-run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ topic: topic || undefined })
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    alert(data.error || "Failed to run team round");
+    return;
+  }
+  await loadTeams();
 }
 
 function renderLinkedTeamTask(task) {

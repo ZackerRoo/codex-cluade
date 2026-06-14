@@ -1105,6 +1105,42 @@ describe("delegate task MCP tools", () => {
     assert.equal(coordinatedContent.team?.coordinator?.phase, "running");
   });
 
+  it("runs a Team Mode communication round and records member messages", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-round-test-"));
+    const tools = createTaskTools({ teamStore: new TeamStore({ rootDir }) });
+    await tools.teamCreateTool({
+      teamId: "round-team",
+      workspace: "/tmp/project",
+      goal: "Design a stable import pipeline",
+      members: [
+        { id: "planner", role: "planning", profile: "planner", agent: "codex-cli" },
+        { id: "coder", role: "implementation", profile: "coder", agent: "claude" },
+        { id: "reviewer", role: "review", profile: "reviewer", agent: "codex-cli" },
+        { id: "merger", role: "merge", profile: "coder", agent: "claude" }
+      ]
+    });
+    await tools.teamTaskCreateTool({ teamId: "round-team", title: "Draft import plan", assignee: "planner" });
+
+    const round = await tools.teamRoundRunTool({
+      teamId: "round-team",
+      topic: "Agree on implementation plan and risks",
+      participants: ["planner", "coder", "reviewer", "merger"]
+    });
+
+    assert.equal(round.structuredContent?.ok, true);
+    const content = round.structuredContent as {
+      round?: { id?: string; participantCount?: number; messages?: Array<{ from?: string; body?: string }> };
+      team?: { coordinator?: { phase?: string; lastAction?: string }; messages?: Array<{ from?: string; body?: string }> };
+    };
+    assert.equal(content.round?.participantCount, 4);
+    assert.ok(content.round?.id);
+    assert.deepEqual(content.round?.messages?.map(message => message.from), ["planner", "coder", "reviewer", "merger"]);
+    assert.match(content.round?.messages?.[0]?.body ?? "", /Round/);
+    assert.equal(content.team?.coordinator?.phase, "running");
+    assert.match(content.team?.coordinator?.lastAction ?? "", /communication round/);
+    assert.equal(content.team?.messages?.length, 4);
+  });
+
   it("enforces Team Mode allowed-agent budget", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-budget-test-"));
     const tools = createTaskTools({ teamStore: new TeamStore({ rootDir }) });

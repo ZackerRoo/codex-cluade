@@ -84,7 +84,7 @@ export class TeamStore {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  sendMessage(input: { teamId: string; from: string; to?: string; body: string; taskId?: string }): TeamMessage | undefined {
+  sendMessage(input: { teamId: string; from: string; to?: string; body: string; taskId?: string; roundId?: string }): TeamMessage | undefined {
     const team = this.get(input.teamId);
     if (!team) return undefined;
     const now = new Date().toISOString();
@@ -95,6 +95,7 @@ export class TeamStore {
       to: input.to ?? "all",
       body: input.body,
       taskId: input.taskId,
+      roundId: input.roundId,
       createdAt: now
     };
     team.messages.push(message);
@@ -158,6 +159,7 @@ export class TeamStore {
       lastAction: patch.lastAction ?? team.coordinator?.lastAction,
       mergerTaskId: patch.mergerTaskId ?? team.coordinator?.mergerTaskId,
       reviewTaskId: patch.reviewTaskId ?? team.coordinator?.reviewTaskId,
+      lastRoundId: patch.lastRoundId ?? team.coordinator?.lastRoundId,
       createdAt: team.coordinator?.createdAt ?? now,
       updatedAt: now
     };

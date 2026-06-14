@@ -91,6 +91,7 @@ describe("dashboard server", () => {
     assert.match(html, /team-template/);
     assert.match(html, /team-auto-start/);
     assert.match(html, /team-auto-merge/);
+    assert.match(html, /team-round-topic/);
     assert.match(html, /show-child-tasks/);
     assert.match(html, /Show child tasks/);
   });
@@ -159,6 +160,8 @@ describe("dashboard server", () => {
     assert.match(js, /loadTeamTemplates/);
     assert.match(js, /runTeamCoordinator/);
     assert.match(js, /Run coordinator/);
+    assert.match(js, /runTeamRound/);
+    assert.match(js, /Run team round/);
   });
 
   it("serves dashboard code that preserves task detail scroll during auto-refresh", async () => {
@@ -735,6 +738,49 @@ describe("dashboard server", () => {
       assert.equal(team.ok, true);
       assert.equal(team.linkedTasks?.[0]?.id, started.delegatedTaskId);
       assert.ok(team.linkedTasks?.[0]?.status);
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("runs Team Mode communication rounds through the live dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-round-"));
+    const tools = createTaskTools({ teamStore: new TeamStore({ rootDir: join(root, "teams") }) });
+    const liveServer = createDashboardServer({ taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      await fetch(`${liveBaseUrl}/api/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          teamId: "dashboard-round-team",
+          workspace: "/tmp/project",
+          goal: "Coordinate a feature",
+          members: [
+            { id: "planner", role: "planning", agent: "codex-cli" },
+            { id: "coder", role: "implementation", agent: "claude" },
+            { id: "reviewer", role: "review", agent: "codex-cli" }
+          ]
+        })
+      });
+
+      const roundResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-round-team/round-run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ topic: "Align on plan, risks, and next action" })
+      });
+      const round = await roundResponse.json() as {
+        ok?: boolean;
+        round?: { participantCount?: number; messages?: Array<{ from?: string; body?: string }> };
+        team?: { messages?: unknown[]; coordinator?: { phase?: string } };
+      };
+
+      assert.equal(roundResponse.status, 200);
+      assert.equal(round.ok, true);
+      assert.equal(round.round?.participantCount, 3);
+      assert.equal(round.round?.messages?.length, 3);
+      assert.equal(round.team?.messages?.length, 3);
+      assert.equal(round.team?.coordinator?.phase, "running");
     } finally {
       await new Promise<void>(resolve => liveServer.close(() => resolve()));
     }

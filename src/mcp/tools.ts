@@ -22,7 +22,7 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import { ProviderDoctor } from "../doctor/ProviderDoctor.js";
-import type { AgentName, AgentProfileName, AgentTeam, DelegatedTask, Effort, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamBudget, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
+import type { AgentName, AgentProfileName, AgentTeam, DelegatedTask, Effort, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamBudget, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 import { createGitCheckpoint } from "../utils/git.js";
 import { buildWebVerifyCommand } from "../verification/WebAppVerifier.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
@@ -200,6 +200,13 @@ export interface TeamCoordinatorRunArgs {
   maxStarts?: number;
 }
 
+export interface TeamRoundRunArgs {
+  teamId: string;
+  topic?: string;
+  participants?: string[];
+  maxParticipants?: number;
+}
+
 export interface TeamMessageArgs {
   teamId: string;
   from: string;
@@ -270,6 +277,7 @@ export interface TaskToolSet {
   teamTemplatesTool(): Promise<CallToolResult>;
   teamCreateFromTemplateTool(args: TeamCreateFromTemplateArgs): Promise<CallToolResult>;
   teamCoordinatorRunTool(args: TeamCoordinatorRunArgs): Promise<CallToolResult>;
+  teamRoundRunTool(args: TeamRoundRunArgs): Promise<CallToolResult>;
   teamSendMessageTool(args: TeamMessageArgs): Promise<CallToolResult>;
   teamInboxTool(args: TeamInboxArgs): Promise<CallToolResult>;
   teamTaskCreateTool(args: TeamTaskCreateArgs): Promise<CallToolResult>;
@@ -669,6 +677,64 @@ export function createTaskTools(options: {
         phase,
         actions,
         startedTaskIds,
+        linkedTasks: linkedTasksFor(finalTeam)
+      }
+    };
+  }
+
+  async function runTeamRound(args: TeamRoundRunArgs): Promise<CallToolResult> {
+    const team = syncLinkedTeamTasks(teamStore.get(args.teamId));
+    if (!team) return errorResult(`Team not found: ${args.teamId}`);
+    const requestedParticipants = new Set((args.participants ?? []).map(item => item.trim()).filter(Boolean));
+    const candidates = requestedParticipants.size > 0
+      ? team.members.filter(member => requestedParticipants.has(member.id))
+      : team.members;
+    const maxParticipants = Math.max(1, args.maxParticipants ?? candidates.length);
+    const participants = candidates.slice(0, maxParticipants);
+    if (participants.length === 0) return errorResult("No matching team round participants.");
+
+    const roundNumber = team.messages.filter(message => message.roundId).reduce((max, message) => {
+      const match = /-round-(\d+)$/.exec(message.roundId ?? "");
+      return Math.max(max, match ? Number(match[1]) : 0);
+    }, 0) + 1;
+    const roundId = `${team.id}-round-${roundNumber}`;
+    const topic = args.topic?.trim() || team.coordinator?.lastAction || team.goal;
+    const messages = participants.map((member, index) => teamStore.sendMessage({
+      teamId: team.id,
+      from: member.id,
+      to: "all",
+      roundId,
+      body: buildTeamRoundMessage({ team, member, topic, roundId, index, participantCount: participants.length })
+    })).filter((message): message is TeamMessage => Boolean(message));
+
+    const phase = phaseForTeam(team) === "idle" ? "running" : phaseForTeam(team);
+    teamStore.updateCoordinator(team.id, {
+      enabled: true,
+      autoStart: team.coordinator?.autoStart ?? false,
+      autoMerge: team.coordinator?.autoMerge ?? true,
+      phase,
+      lastAction: `Ran communication round ${roundId}`,
+      lastRoundId: roundId
+    });
+    const finalTeam = syncLinkedTeamTasks(teamStore.get(team.id)) ?? team;
+
+    return {
+      content: [{ type: "text", text: [
+        `Team round: ${roundId}`,
+        `Team: ${team.id}`,
+        `Topic: ${topic}`,
+        `Participants: ${participants.map(member => member.id).join(", ")}`,
+        messages.length > 0 ? `Messages:\n- ${messages.map(message => `${message.from}: ${message.body}`).join("\n- ")}` : "Messages: none"
+      ].join("\n") }],
+      structuredContent: {
+        ok: true,
+        team: finalTeam,
+        round: {
+          id: roundId,
+          topic,
+          participantCount: participants.length,
+          messages
+        },
         linkedTasks: linkedTasksFor(finalTeam)
       }
     };
@@ -1079,6 +1145,11 @@ export function createTaskTools(options: {
     async teamCoordinatorRunTool(args: TeamCoordinatorRunArgs): Promise<CallToolResult> {
       if (!args.teamId) return errorResult("teamId is required");
       return runTeamCoordinator(args);
+    },
+
+    async teamRoundRunTool(args: TeamRoundRunArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      return runTeamRound(args);
     },
 
     async teamCreateTool(args: TeamCreateArgs): Promise<CallToolResult> {
@@ -1661,6 +1732,36 @@ function buildTeamTaskRequest(team: AgentTeam, task: TeamTask, overrideRequest?:
     "",
     "Do not work on unrelated team tasks. Report what changed, what was verified, and any blocker."
   ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function buildTeamRoundMessage(input: {
+  team: AgentTeam;
+  member: TeamMember;
+  topic: string;
+  roundId: string;
+  index: number;
+  participantCount: number;
+}): string {
+  const assigned = input.team.tasks.filter(task => task.assignee === input.member.id);
+  const openAssigned = assigned.filter(task => task.status === "todo" || task.status === "in_progress");
+  const blocked = input.team.tasks.filter(task => task.status === "blocked");
+  const completed = input.team.tasks.filter(task => task.status === "done").length;
+  const role = `${input.member.role}${input.member.profile ? `/${input.member.profile}` : ""}`;
+  const nextTask = openAssigned[0] ?? input.team.tasks.find(task => task.status === "todo" || task.status === "in_progress");
+  const prefix = `Round ${input.roundId}: as ${input.member.id} (${role}), topic "${input.topic}".`;
+  const taskLine = nextTask
+    ? `I am focused on ${nextTask.id}: ${nextTask.title} [${nextTask.status}].`
+    : "I do not have an open assigned task right now.";
+  if (/review|qa|test/i.test(role)) {
+    return `${prefix} I will challenge assumptions, watch verification gaps, and review completed work. ${taskLine} Current board: ${completed} done, ${blocked.length} blocked.`;
+  }
+  if (/merge|integrat|stabili/i.test(role) || input.member.id === "merger") {
+    return `${prefix} I will consolidate outputs, track shared-file conflicts, and turn unresolved items into follow-up tasks. Current board: ${completed} done, ${blocked.length} blocked.`;
+  }
+  if (/plan|design|analysis|investig/i.test(role)) {
+    return `${prefix} I will clarify scope, dependencies, and risks before execution moves further. ${taskLine}`;
+  }
+  return `${prefix} I will execute my assigned slice and report changed files, verification, and blockers. ${taskLine}`;
 }
 
 function teamStatusForDelegatedTask(task: DelegatedTask): TeamTaskStatus {

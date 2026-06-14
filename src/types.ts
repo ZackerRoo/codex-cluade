@@ -253,6 +253,7 @@ export interface TeamMessage {
   to: string;
   body: string;
   taskId?: string;
+  roundId?: string;
   createdAt: string;
 }
 
@@ -284,6 +285,7 @@ export interface TeamCoordinatorState {
   lastAction?: string;
   mergerTaskId?: string;
   reviewTaskId?: string;
+  lastRoundId?: string;
   createdAt: string;
   updatedAt: string;
 }
