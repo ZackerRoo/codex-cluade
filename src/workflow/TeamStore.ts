@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentName, AgentTeam, TeamBudget, TeamCoordinatorState, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
+import type { AgentName, AgentTeam, TeamBudget, TeamConflict, TeamCoordinatorState, TeamMemoryEntry, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 
 export interface TeamStoreOptions {
   rootDir?: string;
@@ -56,12 +56,15 @@ export class TeamStore {
         profile: member.profile,
         agent: member.agent,
         summary: member.summary,
+        memory: [],
         status: "active",
         createdAt: now,
         updatedAt: now
       })),
       messages: [],
       tasks: [],
+      memory: [],
+      conflicts: [],
       createdAt: now,
       updatedAt: now
     };
@@ -145,6 +148,52 @@ export class TeamStore {
     team.updatedAt = now;
     this.save(team);
     return task;
+  }
+
+  updateMember(input: { teamId: string; memberId: string; summary?: string; memory?: string[]; status?: TeamMember["status"] }): TeamMember | undefined {
+    const team = this.get(input.teamId);
+    if (!team) return undefined;
+    const member = team.members.find(item => item.id === input.memberId);
+    if (!member) return undefined;
+    const now = new Date().toISOString();
+    if (input.summary !== undefined) member.summary = input.summary;
+    if (input.memory !== undefined) member.memory = input.memory;
+    if (input.status !== undefined) member.status = input.status;
+    member.updatedAt = now;
+    team.updatedAt = now;
+    this.save(team);
+    return member;
+  }
+
+  addMemory(input: { teamId: string; scope: TeamMemoryEntry["scope"]; body: string; memberId?: string; sourceMessageId?: string }): TeamMemoryEntry | undefined {
+    const team = this.get(input.teamId);
+    if (!team) return undefined;
+    const now = new Date().toISOString();
+    const memory: TeamMemoryEntry = {
+      id: `${team.id}-mem-${(team.memory ?? []).length + 1}`,
+      scope: input.scope,
+      memberId: input.memberId,
+      body: input.body,
+      sourceMessageId: input.sourceMessageId,
+      createdAt: now
+    };
+    team.memory = [...(team.memory ?? []), memory].slice(-100);
+    team.updatedAt = now;
+    this.save(team);
+    return memory;
+  }
+
+  setConflicts(teamId: string, conflicts: TeamConflict[]): AgentTeam | undefined {
+    const team = this.get(teamId);
+    if (!team) return undefined;
+    const now = new Date().toISOString();
+    team.conflicts = conflicts.map(conflict => ({
+      ...conflict,
+      updatedAt: now
+    }));
+    team.updatedAt = now;
+    this.save(team);
+    return team;
   }
 
   updateCoordinator(teamId: string, patch: Partial<Omit<TeamCoordinatorState, "createdAt">>): AgentTeam | undefined {

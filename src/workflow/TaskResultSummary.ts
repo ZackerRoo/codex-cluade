@@ -3,7 +3,11 @@ import type { AgentName, DelegatedTask, StageResult, TaskResultSummary } from ".
 export function buildTaskResultSummary(task: DelegatedTask, relatedTasks: DelegatedTask[] = []): TaskResultSummary {
   if (task.kind === "workflow") return buildWorkflowSummary(task, relatedTasks);
   const results = stageResults(task);
-  const changedFiles = unique(results.flatMap(result => result.changedFiles ?? []));
+  const changedFiles = unique([
+    ...results.flatMap(result => result.changedFiles ?? []),
+    ...(task.gitDiff?.files ?? []).map(file => file.path),
+    ...(task.resultSummary?.changedFiles ?? [])
+  ]);
   const lastResult = [...results].reverse().find(result => result.agent);
   const summary = summarizeTask(task, results);
   return {

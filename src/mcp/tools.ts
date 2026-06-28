@@ -22,7 +22,7 @@ import { loadBridgeConfig, type BridgeConfig } from "../config/BridgeConfig.js";
 import { resolveSkills } from "../config/SkillResolver.js";
 import { buildWorkspaceContext } from "../context/WorkspaceContext.js";
 import { ProviderDoctor } from "../doctor/ProviderDoctor.js";
-import type { AgentName, AgentProfileName, AgentTeam, DelegatedTask, Effort, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamBudget, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
+import type { AgentName, AgentProfileName, AgentTeam, DelegatedTask, Effort, Stage, StageResult, TaskCategory, TaskMode, TaskPreview, TeamBudget, TeamConflict, TeamMember, TeamMessage, TeamTask, TeamTaskStatus } from "../types.js";
 import { createGitCheckpoint } from "../utils/git.js";
 import { buildWebVerifyCommand } from "../verification/WebAppVerifier.js";
 import { AgentCoordinator } from "../workflow/AgentCoordinator.js";
@@ -200,11 +200,31 @@ export interface TeamCoordinatorRunArgs {
   maxStarts?: number;
 }
 
+export interface TeamAutonomyRunArgs {
+  teamId: string;
+  cycles?: number;
+  liveAgents?: boolean;
+  createTasks?: boolean;
+  autoStart?: boolean;
+  autoMerge?: boolean;
+  maxStarts?: number;
+  maxParticipants?: number;
+  model?: string;
+  effort?: Effort;
+  timeoutMs?: number;
+}
+
 export interface TeamRoundRunArgs {
   teamId: string;
   topic?: string;
   participants?: string[];
   maxParticipants?: number;
+  liveAgents?: boolean;
+  createTasks?: boolean;
+  maxGeneratedTasks?: number;
+  model?: string;
+  effort?: Effort;
+  timeoutMs?: number;
 }
 
 export interface TeamMessageArgs {
@@ -277,6 +297,7 @@ export interface TaskToolSet {
   teamTemplatesTool(): Promise<CallToolResult>;
   teamCreateFromTemplateTool(args: TeamCreateFromTemplateArgs): Promise<CallToolResult>;
   teamCoordinatorRunTool(args: TeamCoordinatorRunArgs): Promise<CallToolResult>;
+  teamAutonomyRunTool(args: TeamAutonomyRunArgs): Promise<CallToolResult>;
   teamRoundRunTool(args: TeamRoundRunArgs): Promise<CallToolResult>;
   teamSendMessageTool(args: TeamMessageArgs): Promise<CallToolResult>;
   teamInboxTool(args: TeamInboxArgs): Promise<CallToolResult>;
@@ -451,6 +472,7 @@ export function createTaskTools(options: {
   taskStore?: TaskStore;
   taskManager?: TaskManager;
   teamStore?: TeamStore;
+  probeProviderModels?: boolean;
 } = {}): TaskToolSet {
   const config = options.config ?? loadBridgeConfig();
   const registry = new AgentRegistry(config);
@@ -622,10 +644,47 @@ export function createTaskTools(options: {
     }
 
     const activeTeam = syncLinkedTeamTasks(teamStore.get(team.id)) ?? team;
+    let finalTeam = activeTeam;
+    const conflicts = detectTeamConflicts(activeTeam, manager);
+    let conflictTeam = activeTeam;
+    if (conflicts.length > 0) {
+      conflictTeam = teamStore.setConflicts(activeTeam.id, conflicts) ?? activeTeam;
+      const arbitrationTask = ensureConflictArbitrationTask(conflictTeam, conflicts);
+      let reportedConflicts = conflicts;
+      if (arbitrationTask) {
+        actions.push(`Created conflict arbitration task ${arbitrationTask.id}`);
+        reportedConflicts = conflicts.map(conflict => ({ ...conflict, arbitrationTaskId: arbitrationTask.id }));
+        teamStore.setConflicts(conflictTeam.id, reportedConflicts);
+        conflictTeam = syncLinkedTeamTasks(teamStore.get(conflictTeam.id)) ?? conflictTeam;
+      }
+      finalTeam = teamStore.updateCoordinator(conflictTeam.id, {
+        enabled: true,
+        autoStart,
+        autoMerge,
+        phase: "conflict",
+        lastAction: `Detected ${conflicts.length} file conflict${conflicts.length === 1 ? "" : "s"}`
+      }) ?? conflictTeam;
+      return {
+        content: [{ type: "text", text: [
+          `Team coordinator: ${finalTeam.id}`,
+          "Phase: conflict",
+          `Conflicts: ${conflicts.length}`,
+          actions.length > 0 ? `Actions:\n- ${actions.join("\n- ")}` : "Actions: none"
+        ].join("\n") }],
+        structuredContent: {
+          ok: true,
+          team: finalTeam,
+          phase: "conflict",
+          actions,
+          startedTaskIds,
+          conflicts: reportedConflicts,
+          linkedTasks: linkedTasksFor(finalTeam)
+        }
+      };
+    }
     const mergerTaskId = activeTeam.coordinator?.mergerTaskId;
     const nonMergerTasks = activeTeam.tasks.filter(task => task.id !== mergerTaskId);
     const allBaseDone = nonMergerTasks.length > 0 && nonMergerTasks.every(task => task.status === "done");
-    let finalTeam = activeTeam;
 
     if (autoMerge && allBaseDone && !mergerTaskId) {
       const merger = teamStore.createTask({
@@ -699,13 +758,69 @@ export function createTaskTools(options: {
     }, 0) + 1;
     const roundId = `${team.id}-round-${roundNumber}`;
     const topic = args.topic?.trim() || team.coordinator?.lastAction || team.goal;
-    const messages = participants.map((member, index) => teamStore.sendMessage({
-      teamId: team.id,
-      from: member.id,
-      to: "all",
-      roundId,
-      body: buildTeamRoundMessage({ team, member, topic, roundId, index, participantCount: participants.length })
-    })).filter((message): message is TeamMessage => Boolean(message));
+    const messages: TeamMessage[] = [];
+    const agentResults: Array<{ agent: AgentName; stage: Stage; summary: string; sessionId?: string; ok: boolean }> = [];
+    for (const [index, member] of participants.entries()) {
+      const preferredAgent = member.agent;
+      const budgetError = args.liveAgents ? validateTeamBudgetForStart(team, preferredAgent, manager) : undefined;
+      if (budgetError) return errorResult(budgetError);
+      let body = buildTeamRoundMessage({ team, member, topic, roundId, index, participantCount: participants.length });
+      if (args.liveAgents) {
+        const stage: Stage = /review|qa|test/i.test(`${member.role} ${member.profile ?? ""}`) ? "review" : "analyze";
+        const result = await manager.run({
+          mode: "sync",
+          workspace: team.workspace,
+          request: buildLiveTeamRoundRequest({ team, member, topic, roundId }),
+          stages: [stage],
+          routing: {},
+          profile: member.profile,
+          preferredAgent,
+          runId: `${roundId}-${member.id}`,
+          model: args.model,
+          effort: args.effort,
+          timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs
+        });
+        const lastStage = result.result?.results.at(-1);
+        const outputSummary = lastStage ? await readStageOutputSummary(lastStage) : undefined;
+        const summary = outputSummary || result.result?.summary || lastStage?.summary || "no summary returned";
+        if (lastStage) {
+          agentResults.push({
+            agent: lastStage.agent,
+            stage: lastStage.stage,
+            summary,
+            sessionId: lastStage.agentSessionId,
+            ok: lastStage.ok
+          });
+        }
+        body = summary
+          ? `Live agent response: ${summary}`
+          : "Live agent response failed: no summary returned";
+      }
+      const message = teamStore.sendMessage({
+        teamId: team.id,
+        from: member.id,
+        to: "all",
+        roundId,
+        body
+      });
+      if (message) {
+        messages.push(message);
+        rememberTeamMessage(team.id, member.id, message);
+      }
+    }
+    const generatedTasks = args.createTasks
+      ? messages.slice(0, Math.max(0, args.maxGeneratedTasks ?? participants.length)).map(message => teamStore.createTask({
+        teamId: team.id,
+        title: `Follow up from ${message.from}`,
+        assignee: message.from,
+        description: [
+          `Created from ${roundId}.`,
+          `Topic: ${topic}`,
+          "",
+          message.body
+        ].join("\n")
+      })).filter((task): task is TeamTask => Boolean(task))
+      : [];
 
     const phase = phaseForTeam(team) === "idle" ? "running" : phaseForTeam(team);
     teamStore.updateCoordinator(team.id, {
@@ -724,8 +839,10 @@ export function createTaskTools(options: {
         `Team: ${team.id}`,
         `Topic: ${topic}`,
         `Participants: ${participants.map(member => member.id).join(", ")}`,
+        args.liveAgents ? `Live agent responses: ${agentResults.length}` : undefined,
+        generatedTasks.length > 0 ? `Generated tasks: ${generatedTasks.length}` : undefined,
         messages.length > 0 ? `Messages:\n- ${messages.map(message => `${message.from}: ${message.body}`).join("\n- ")}` : "Messages: none"
-      ].join("\n") }],
+      ].filter((line): line is string => line !== undefined).join("\n") }],
       structuredContent: {
         ok: true,
         team: finalTeam,
@@ -733,16 +850,134 @@ export function createTaskTools(options: {
           id: roundId,
           topic,
           participantCount: participants.length,
-          messages
+          liveAgents: Boolean(args.liveAgents),
+          messages,
+          agentResults,
+          generatedTasks
         },
         linkedTasks: linkedTasksFor(finalTeam)
       }
     };
   }
 
+  async function runTeamAutonomy(args: TeamAutonomyRunArgs): Promise<CallToolResult> {
+    let team = syncLinkedTeamTasks(teamStore.get(args.teamId));
+    if (!team) return errorResult(`Team not found: ${args.teamId}`);
+    const cycles = Math.max(1, Math.min(10, args.cycles ?? 3));
+    const cycleResults: Array<{ cycle: number; phase?: string; roundId?: string; actions?: string[]; conflicts?: TeamConflict[] }> = [];
+
+    for (let index = 0; index < cycles; index += 1) {
+      team = syncLinkedTeamTasks(teamStore.get(args.teamId)) ?? team;
+      const phase = phaseForTeam(team);
+      if (phase === "completed" || phase === "blocked" || phase === "conflict") {
+        cycleResults.push({ cycle: index + 1, phase, actions: ["Stopped because team is not runnable."] });
+        break;
+      }
+
+      const round = await runTeamRound({
+        teamId: args.teamId,
+        topic: `Autonomy cycle ${index + 1}: assess progress, blockers, conflicts, and next action.`,
+        liveAgents: args.liveAgents ?? true,
+        createTasks: args.createTasks ?? false,
+        maxParticipants: args.maxParticipants,
+        model: args.model,
+        effort: args.effort,
+        timeoutMs: args.timeoutMs
+      });
+      if (round.isError) return round;
+
+      const coordinator = await runTeamCoordinator({
+        teamId: args.teamId,
+        autoStart: args.autoStart ?? true,
+        autoMerge: args.autoMerge ?? true,
+        maxStarts: args.maxStarts
+      });
+      if (coordinator.isError) return coordinator;
+
+      const roundContent = round.structuredContent as { round?: { id?: string } } | undefined;
+      const coordinatorContent = coordinator.structuredContent as { phase?: string; actions?: string[]; conflicts?: TeamConflict[] } | undefined;
+      cycleResults.push({
+        cycle: index + 1,
+        phase: coordinatorContent?.phase,
+        roundId: roundContent?.round?.id,
+        actions: coordinatorContent?.actions,
+        conflicts: coordinatorContent?.conflicts
+      });
+
+      team = syncLinkedTeamTasks(teamStore.get(args.teamId)) ?? team;
+      const nextPhase = phaseForTeam(team);
+      if (nextPhase === "completed" || nextPhase === "blocked" || nextPhase === "conflict") break;
+      if ((coordinatorContent?.actions ?? []).length === 0 && !args.createTasks) break;
+    }
+
+    const finalTeam = syncLinkedTeamTasks(teamStore.get(args.teamId)) ?? team;
+    const finalPhase = phaseForTeam(finalTeam);
+    teamStore.updateCoordinator(finalTeam.id, {
+      enabled: true,
+      autoStart: args.autoStart ?? finalTeam.coordinator?.autoStart ?? true,
+      autoMerge: args.autoMerge ?? finalTeam.coordinator?.autoMerge ?? true,
+      phase: finalPhase,
+      lastAction: `Autonomy loop ran ${cycleResults.length} cycle${cycleResults.length === 1 ? "" : "s"}`
+    });
+    const updatedTeam = syncLinkedTeamTasks(teamStore.get(args.teamId)) ?? finalTeam;
+    return {
+      content: [{ type: "text", text: [
+        `Team autonomy loop: ${args.teamId}`,
+        `Cycles: ${cycleResults.length}/${cycles}`,
+        `Phase: ${phaseForTeam(updatedTeam)}`,
+        `Memory entries: ${updatedTeam.memory?.length ?? 0}`,
+        `Open conflicts: ${(updatedTeam.conflicts ?? []).filter(conflict => conflict.status === "open").length}`
+      ].join("\n") }],
+      structuredContent: {
+        ok: true,
+        team: updatedTeam,
+        cycles: cycleResults,
+        linkedTasks: linkedTasksFor(updatedTeam),
+        conflicts: updatedTeam.conflicts ?? []
+      }
+    };
+  }
+
+  function rememberTeamMessage(teamId: string, memberId: string, message: TeamMessage): void {
+    const body = summarizeMemory(message.body);
+    if (!body) return;
+    teamStore.addMemory({ teamId, scope: "team", body, sourceMessageId: message.id });
+    teamStore.addMemory({ teamId, scope: "member", memberId, body, sourceMessageId: message.id });
+    const latestTeam = teamStore.get(teamId);
+    const member = latestTeam?.members.find(item => item.id === memberId);
+    const previous = member?.memory ?? [];
+    teamStore.updateMember({
+      teamId,
+      memberId,
+      summary: body,
+      memory: [...previous, body].slice(-20)
+    });
+  }
+
+  function ensureConflictArbitrationTask(team: AgentTeam, conflicts: TeamConflict[]): TeamTask | undefined {
+    const openConflictTask = team.tasks.find(task => task.status !== "done" && /conflict arbitration/i.test(`${task.title}\n${task.description}`));
+    if (openConflictTask) return undefined;
+    const assignee = team.members.find(member => member.id === "merger")?.id
+      ?? team.members.find(member => /review|qa|merge/i.test(member.role))?.id
+      ?? team.lead;
+    const files = conflicts.map(conflict => `- ${conflict.file}: ${conflict.teamTaskIds.join(", ")} (${conflict.taskIds.join(", ")})`).join("\n");
+    return teamStore.createTask({
+      teamId: team.id,
+      title: `Conflict arbitration for ${conflicts.length} shared file${conflicts.length === 1 ? "" : "s"}`,
+      assignee,
+      description: [
+        "Conflict arbitration task.",
+        "Inspect overlapping agent changes, choose the canonical implementation, and update or restart affected tasks before continuing.",
+        "",
+        "Conflicts:",
+        files
+      ].join("\n")
+    });
+  }
+
   return {
     async providerDoctorTool(): Promise<CallToolResult> {
-      const result = await new ProviderDoctor({ config }).check();
+      const result = await new ProviderDoctor({ config, probeModels: options.probeProviderModels ?? true }).check();
       return {
         content: [{ type: "text", text: formatProviderDoctor(result) }],
         structuredContent: { ...result }
@@ -1147,6 +1382,11 @@ export function createTaskTools(options: {
       return runTeamCoordinator(args);
     },
 
+    async teamAutonomyRunTool(args: TeamAutonomyRunArgs): Promise<CallToolResult> {
+      if (!args.teamId) return errorResult("teamId is required");
+      return runTeamAutonomy(args);
+    },
+
     async teamRoundRunTool(args: TeamRoundRunArgs): Promise<CallToolResult> {
       if (!args.teamId) return errorResult("teamId is required");
       return runTeamRound(args);
@@ -1511,24 +1751,108 @@ async function runUltraworkCommand(
     cliPath: fileURLToPath(new URL("../cli.js", import.meta.url))
   });
   const planId = args.planId ?? createPlanId();
-  const planResult = await runCreatePlan({
+  const planStore = new PlanStore(args.workspace);
+  const planPath = planStore.planPath(planId);
+  const skills = await resolveSkills(args.loadSkills, config);
+  const parentTaskId = args.runId ?? `ultrawork-${planId}`;
+  const planningTaskId = `${parentTaskId}-plan`;
+  await manager.run({
+    mode: "background",
+    workspace: args.workspace,
+    request: buildPlannerRequest(args.request),
+    stages: ["plan"],
+    routing: {},
+    profile: args.plannerProfile,
+    preferredAgent: args.preferredAgent ?? (args.plannerProfile ? undefined : "claude"),
+    runId: planningTaskId,
+    model: args.model,
+    effort: args.effort,
+    timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
+    parentTaskId,
+    skills
+  });
+  const workflowTask = manager.createWorkflowTask({
+    id: parentTaskId,
     workspace: args.workspace,
     request: args.request,
     planId,
-    plannerProfile: args.plannerProfile,
-    preferredAgent: args.preferredAgent,
-    loadSkills: args.loadSkills,
-    model: args.model,
-    effort: args.effort,
-    timeoutMs: args.timeoutMs
-  }, config, manager);
-  if (planResult.isError || planResult.structuredContent?.ok !== true) return planResult;
-  const planPath = String(planResult.structuredContent.planPath ?? "");
-  const plan = await new PlanStore(args.workspace).read({ planId, planPath });
+    planPath,
+    childTaskIds: [planningTaskId],
+    maxRepairAttempts: args.maxRepairAttempts
+  });
+  void continueUltraworkAfterPlan({
+    args,
+    config,
+    manager,
+    planId,
+    planPath,
+    parentTaskId,
+    planningTaskId,
+    verifyCommand,
+    skills
+  });
+  return {
+    content: [{
+      type: "text",
+      text: [
+        "Ultrawork planning launched",
+        `planId: ${planId}`,
+        `planPath: ${planPath}`,
+        `Task: ${workflowTask.id}`,
+        `Planning task: ${planningTaskId}`,
+        "Implementation and review tasks will be created automatically after the plan finishes."
+      ].join("\n")
+    }],
+    structuredContent: {
+      ok: true,
+      planId,
+      planPath,
+      mode: "background",
+      taskId: workflowTask.id,
+      task: workflowTask,
+      planningTaskId,
+      childTaskIds: [planningTaskId],
+      verifyCommand,
+      workflowOptions: {
+        maxImplementationTasks: config.workflow?.maxImplementationTasks ?? 6,
+        maxRunning: config.workflow?.maxRunning ?? 3
+      }
+    }
+  };
+}
+
+async function continueUltraworkAfterPlan(input: {
+  args: CreatePlanArgs & ExecutePlanArgs & { executorProfile: AgentProfileName };
+  config: BridgeConfig;
+  manager: TaskManager;
+  planId: string;
+  planPath: string;
+  parentTaskId: string;
+  planningTaskId: string;
+  verifyCommand?: string;
+  skills: Awaited<ReturnType<typeof resolveSkills>>;
+}): Promise<void> {
+  const { args, config, manager, planId, planPath, parentTaskId, planningTaskId, verifyCommand, skills } = input;
+  try {
+    const plannerTask = await waitForTaskTerminal(manager, planningTaskId);
+    const plannerResult = plannerTask.result as { ok?: boolean; results?: StageResult[] } | undefined;
+    const stageResult = plannerResult?.results?.at(-1);
+    if (plannerTask.status !== "completed" || plannerResult?.ok !== true || !stageResult?.outputPath) {
+      manager.createWorkflowTask({
+        id: parentTaskId,
+        workspace: args.workspace,
+        request: args.request,
+        planId,
+        planPath,
+        childTaskIds: [planningTaskId],
+        maxRepairAttempts: args.maxRepairAttempts
+      });
+      return;
+    }
+    const planContent = await readFile(stageResult.outputPath, "utf8");
+    const plan = await new PlanStore(args.workspace).write(planId, normalizePlanContent(planId, args.request, planContent));
   const maxImplementationTasks = config.workflow?.maxImplementationTasks ?? 6;
   const subtasks = extractPlanSubtasks(plan.content, maxImplementationTasks);
-  const skills = await resolveSkills(args.loadSkills, config);
-  const parentTaskId = args.runId ?? `ultrawork-${plan.planId}`;
   const childTaskIds: string[] = [];
   for (const [index, subtask] of subtasks.entries()) {
     const childRunId = `${parentTaskId}-part-${index + 1}`;
@@ -1572,7 +1896,7 @@ async function runUltraworkCommand(
     timeoutMs: args.timeoutMs ?? config.defaults?.timeoutMs,
     skills
   });
-  const workflowTask = manager.createWorkflowTask({
+  manager.createWorkflowTask({
     id: parentTaskId,
     workspace: args.workspace,
     request: args.request,
@@ -1583,37 +1907,25 @@ async function runUltraworkCommand(
     verifyCommand,
     maxRepairAttempts: args.maxRepairAttempts
   });
-  return {
-    content: [{
-      type: "text",
-      text: [
-        "Ultrawork launched",
-        `planId: ${planId}`,
-        `planPath: ${planPath}`,
-        `Implementation batches: ${subtasks.length}`,
-        `Workflow concurrency: ${config.workflow?.maxRunning ?? 3}`,
-        `Task: ${workflowTask.id}`,
-        `Review task: ${reviewTaskId}`,
-        `Child tasks: ${childTaskIds.join(", ")}`
-      ].filter(Boolean).join("\n")
-    }],
-    structuredContent: {
-      ok: true,
+  } catch {
+    manager.createWorkflowTask({
+      id: parentTaskId,
+      workspace: args.workspace,
+      request: args.request,
       planId,
       planPath,
-      plannerRunId: planResult.structuredContent.plannerRunId,
-      plannerResult: planResult.structuredContent.plannerResult,
-      mode: "background",
-      taskId: workflowTask.id,
-      task: workflowTask,
-      childTaskIds,
-      reviewTaskId,
-      workflowOptions: {
-        maxImplementationTasks,
-        maxRunning: config.workflow?.maxRunning ?? 3
-      }
-    }
-  };
+      childTaskIds: [planningTaskId],
+      maxRepairAttempts: args.maxRepairAttempts
+    });
+  }
+}
+
+async function waitForTaskTerminal(manager: TaskManager, taskId: string): Promise<DelegatedTask> {
+  for (;;) {
+    const task = manager.get(taskId);
+    if (task && task.status !== "pending" && task.status !== "running") return task;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
 }
 
 async function runExecutePlan(args: ExecutePlanArgs, config: BridgeConfig, manager: TaskManager): Promise<CallToolResult> {
@@ -1764,6 +2076,87 @@ function buildTeamRoundMessage(input: {
   return `${prefix} I will execute my assigned slice and report changed files, verification, and blockers. ${taskLine}`;
 }
 
+function buildLiveTeamRoundRequest(input: {
+  team: AgentTeam;
+  member: TeamMember;
+  topic: string;
+  roundId: string;
+}): string {
+  const assignedTasks = input.team.tasks
+    .filter(task => task.assignee === input.member.id)
+    .map(task => `- ${task.id} [${task.status}]: ${task.title}`)
+    .join("\n") || "- none";
+  const board = input.team.tasks
+    .map(task => `- ${task.id} [${task.status}]${task.assignee ? ` @${task.assignee}` : ""}: ${task.title}`)
+    .join("\n") || "- no shared tasks";
+  return [
+    "Participate in one Team Mode communication round.",
+    "Do not modify files. Do not start tools that edit the workspace.",
+    "",
+    `Round: ${input.roundId}`,
+    `Team: ${input.team.id}`,
+    `Goal: ${input.team.goal}`,
+    `Topic: ${input.topic}`,
+    `Your member id: ${input.member.id}`,
+    `Your role: ${input.member.role}`,
+    input.member.profile ? `Your profile: ${input.member.profile}` : undefined,
+    "",
+    "Your assigned tasks:",
+    assignedTasks,
+    "",
+    "Current shared task board:",
+    board,
+    "",
+    "Reply with a concise team message covering your view of scope, risks, blockers, and next action."
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+async function readStageOutputSummary(stage: StageResult): Promise<string | undefined> {
+  if (!stage.outputPath) return undefined;
+  try {
+    const content = await readFile(stage.outputPath, "utf8");
+    return content.trim().slice(0, 2000) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function summarizeMemory(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+function detectTeamConflicts(team: AgentTeam, manager: TaskManager): TeamConflict[] {
+  const now = new Date().toISOString();
+  const byFile = new Map<string, Array<{ taskId: string; teamTaskId: string }>>();
+  for (const teamTask of team.tasks) {
+    if (!teamTask.linkedTaskId) continue;
+    const delegated = manager.get(teamTask.linkedTaskId);
+    const changedFiles = delegated?.resultSummary?.changedFiles ?? [];
+    for (const file of changedFiles) {
+      const normalized = file.trim();
+      if (!normalized) continue;
+      const items = byFile.get(normalized) ?? [];
+      items.push({ taskId: teamTask.linkedTaskId, teamTaskId: teamTask.id });
+      byFile.set(normalized, items);
+    }
+  }
+  return Array.from(byFile.entries())
+    .filter(([, items]) => new Set(items.map(item => item.taskId)).size > 1)
+    .map(([file, items], index): TeamConflict => {
+      const existing = team.conflicts?.find(conflict => conflict.file === file && conflict.status === "open");
+      return {
+        id: existing?.id ?? `${team.id}-conflict-${index + 1}`,
+        file,
+        taskIds: [...new Set(items.map(item => item.taskId))],
+        teamTaskIds: [...new Set(items.map(item => item.teamTaskId))],
+        status: existing?.status ?? "open",
+        arbitrationTaskId: existing?.arbitrationTaskId,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      };
+    });
+}
+
 function teamStatusForDelegatedTask(task: DelegatedTask): TeamTaskStatus {
   if (task.status === "completed") return "done";
   if (task.status === "failed" || task.status === "interrupted") return "blocked";
@@ -1811,7 +2204,8 @@ function buildMergerTaskDescription(team: AgentTeam): string {
   ].join("\n");
 }
 
-function phaseForTeam(team: AgentTeam): "idle" | "running" | "merging" | "completed" | "blocked" {
+function phaseForTeam(team: AgentTeam): "idle" | "running" | "merging" | "completed" | "blocked" | "conflict" {
+  if ((team.conflicts ?? []).some(conflict => conflict.status === "open")) return "conflict";
   if (team.tasks.some(task => task.status === "blocked")) return "blocked";
   if (team.tasks.some(task => task.status === "in_progress")) return team.coordinator?.mergerTaskId ? "merging" : "running";
   if (team.tasks.length > 0 && team.tasks.every(task => task.status === "done" || task.status === "cancelled")) return "completed";
@@ -2060,6 +2454,10 @@ function formatProviderDoctor(result: Awaited<ReturnType<ProviderDoctor["check"]
     ...result.checks.map(check => [
       `- ${check.provider}: ${check.status}`,
       check.version ? ` (${check.version})` : "",
+      check.requestedModel ? ` requested=${check.requestedModel}` : "",
+      check.model ? ` model=${check.model}` : "",
+      check.modelStatus ? ` modelStatus=${check.modelStatus}` : "",
+      check.modelError ? ` modelError=${check.modelError}` : "",
       check.error ? ` - ${check.error}` : ""
     ].join("")),
     "",
@@ -2169,6 +2567,8 @@ function formatTeam(team: AgentTeam): string {
     `Members: ${team.members.length}`,
     ...team.members.map(member => `- ${member.id}: ${member.role}${member.profile ? ` / ${member.profile}` : ""}${member.agent ? ` / ${member.agent}` : ""} (${member.status})`),
     `Messages: ${team.messages.length}`,
+    `Memory: ${team.memory?.length ?? 0}`,
+    `Open conflicts: ${(team.conflicts ?? []).filter(conflict => conflict.status === "open").length}`,
     `Tasks: ${team.tasks.length}${team.tasks.length > 0 ? ` (${Object.entries(taskCounts).map(([status, count]) => `${status}:${count}`).join(", ")})` : ""}`,
     ...team.tasks.slice(0, 8).map(task => `- ${task.id}: ${task.status} ${task.title}${task.assignee ? ` @${task.assignee}` : ""}${task.linkedTaskId ? ` -> ${task.linkedTaskId}` : ""}`),
     `Updated: ${team.updatedAt}`

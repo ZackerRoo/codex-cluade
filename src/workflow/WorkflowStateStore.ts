@@ -12,6 +12,10 @@ export interface CreateWorkflowStateInput {
   reviewTaskId?: string;
 }
 
+export interface UpdateWorkflowStateOptions extends Partial<Pick<CreateWorkflowStateInput, "request" | "planId" | "planPath" | "childTaskIds" | "reviewTaskId">> {
+  persist?: boolean;
+}
+
 export class WorkflowStateStore {
   constructor(private readonly workspace: string) {}
 
@@ -26,25 +30,7 @@ export class WorkflowStateStore {
   create(input: CreateWorkflowStateInput): WorkflowState {
     const existing = this.get(input.workflowId);
     if (existing) return existing;
-    const now = new Date().toISOString();
-    const state: WorkflowState = {
-      workflowId: input.workflowId,
-      request: input.request,
-      phase: "executing",
-      planId: input.planId,
-      planPath: input.planPath,
-      statePath: this.statePath(input.workflowId),
-      childTaskIds: input.childTaskIds,
-      reviewTaskId: input.reviewTaskId,
-      steps: buildInitialSteps(input),
-      learnings: [],
-      nextAction: {
-        kind: "wait",
-        reason: "Waiting for workflow tasks to finish."
-      },
-      createdAt: now,
-      updatedAt: now
-    };
+    const state = this.initialState(input);
     this.save(state);
     return state;
   }
@@ -62,9 +48,9 @@ export class WorkflowStateStore {
   updateFromTasks(
     workflowId: string,
     tasks: DelegatedTask[],
-    options: Partial<Pick<CreateWorkflowStateInput, "request" | "planId" | "planPath" | "childTaskIds" | "reviewTaskId">> = {}
+    options: UpdateWorkflowStateOptions = {}
   ): WorkflowState {
-    const state = this.get(workflowId) ?? this.create({
+    const state = this.get(workflowId) ?? this.initialState({
       workflowId,
       request: options.request ?? "",
       planId: options.planId,
@@ -97,8 +83,30 @@ export class WorkflowStateStore {
       nextAction: nextActionFor(phase, steps),
       updatedAt: new Date().toISOString()
     };
-    this.save(updated);
+    if (options.persist !== false) this.save(updated);
     return updated;
+  }
+
+  private initialState(input: CreateWorkflowStateInput): WorkflowState {
+    const now = new Date().toISOString();
+    return {
+      workflowId: input.workflowId,
+      request: input.request,
+      phase: "executing",
+      planId: input.planId,
+      planPath: input.planPath,
+      statePath: this.statePath(input.workflowId),
+      childTaskIds: input.childTaskIds,
+      reviewTaskId: input.reviewTaskId,
+      steps: buildInitialSteps(input),
+      learnings: [],
+      nextAction: {
+        kind: "wait",
+        reason: "Waiting for workflow tasks to finish."
+      },
+      createdAt: now,
+      updatedAt: now
+    };
   }
 
   private save(state: WorkflowState): void {

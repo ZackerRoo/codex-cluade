@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 import { stat } from "node:fs/promises";
 import { artifactPaths, readBackgroundOutput } from "../mcp/backgroundOutput.js";
-import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet, TeamCoordinatorRunArgs, TeamCreateArgs, TeamCreateFromTemplateArgs, TeamMessageArgs, TeamRoundRunArgs, TeamTaskCreateArgs, TeamTaskStartArgs, TeamTaskUpdateArgs } from "../mcp/tools.js";
+import type { AutoDispatchArgs, CreatePlanArgs, DelegateTaskArgs, ExecutePlanArgs, RunCommandArgs, TaskPreviewArgs, TaskToolSet, TeamAutonomyRunArgs, TeamCoordinatorRunArgs, TeamCreateArgs, TeamCreateFromTemplateArgs, TeamMessageArgs, TeamRoundRunArgs, TeamTaskCreateArgs, TeamTaskStartArgs, TeamTaskUpdateArgs } from "../mcp/tools.js";
 import type { StabilityRunner, StabilityRunInput } from "../stability/StabilityRunner.js";
 import type { DelegatedTask, StageResult, TaskRuntimeSnapshot, TaskStatus } from "../types.js";
 import { changedFiles } from "../utils/git.js";
@@ -175,6 +175,12 @@ async function routeRequest(
     if (request.method === "POST" && parts[1] === "coordinator-run") {
       const body = await readJsonBody(request) as unknown as Omit<TeamCoordinatorRunArgs, "teamId">;
       const result = await context.taskTools.teamCoordinatorRunTool({ ...body, teamId });
+      sendToolResult(response, result);
+      return;
+    }
+    if (request.method === "POST" && parts[1] === "autonomy-run") {
+      const body = await readJsonBody(request) as unknown as Omit<TeamAutonomyRunArgs, "teamId">;
+      const result = await context.taskTools.teamAutonomyRunTool({ ...body, teamId });
       sendToolResult(response, result);
       return;
     }
@@ -681,6 +687,35 @@ const DASHBOARD_HTML = `<!doctype html>
       </div>
       <div id="task-preview-content" class="preview-content"></div>
     </section>
+    <section class="quick-start" id="quick-start" hidden>
+      <div class="panel-head">
+        <h2>Quick start</h2>
+        <span class="meta">Pick a common workflow</span>
+      </div>
+      <ol class="quick-steps">
+        <li><strong>Workspace</strong><span>Use an absolute project path.</span></li>
+        <li><strong>Request</strong><span>Describe the outcome, not the internal tool.</span></li>
+        <li><strong>Run</strong><span>Open the created task to watch progress.</span></li>
+      </ol>
+      <div class="quick-start-grid" id="quick-start-examples">
+        <button class="quick-start-card" type="button" data-quick-start="understand">
+          <strong>Understand a project</strong>
+          <span>Read code and produce a detailed project summary.</span>
+        </button>
+        <button class="quick-start-card" type="button" data-quick-start="feature">
+          <strong>Build a feature</strong>
+          <span>Plan, implement, verify, and report changed files.</span>
+        </button>
+        <button class="quick-start-card" type="button" data-quick-start="bugfix">
+          <strong>Fix a bug</strong>
+          <span>Reproduce, patch, test, and explain the root cause.</span>
+        </button>
+        <button class="quick-start-card" type="button" data-quick-start="long">
+          <strong>Large multi-agent task</strong>
+          <span>Split work into plan units and coordinate agents.</span>
+        </button>
+      </div>
+    </section>
     <section class="providers" id="providers" hidden></section>
     </section>
     <section class="catalog advanced-only" id="catalog" hidden></section>
@@ -709,28 +744,48 @@ const DASHBOARD_HTML = `<!doctype html>
         <h2>Team Mode</h2>
         <span class="meta">Shared agent messages and task board</span>
       </div>
-      <form id="team-form" class="workflow-form">
-        <div class="form-row">
-          <label>Workspace<input id="team-workspace" placeholder="/absolute/path/to/project" required></label>
-          <label>Lead<input id="team-lead" value="lead" placeholder="lead"></label>
-          <label>Template<select id="team-template"><option value="">Custom team</option></select></label>
-        </div>
-        <div class="form-row">
-          <label>Members<input id="team-members" value="planner:claude,coder:claude,reviewer:codex-cli" placeholder="planner:claude,coder:claude"></label>
-          <label>Max running<input id="team-max-running" type="number" min="1" step="1" placeholder="template default"></label>
-          <label>Max tasks<input id="team-max-tasks" type="number" min="1" step="1" placeholder="template default"></label>
-        </div>
-        <label class="request-field">Goal<textarea id="team-goal" rows="2" placeholder="Describe the team goal" required></textarea></label>
-        <div class="team-options">
-          <label><input id="team-auto-start" type="checkbox">Auto start</label>
-          <label><input id="team-auto-merge" type="checkbox" checked>Auto merge</label>
-        </div>
-        <div class="form-actions">
-          <button id="team-submit" type="submit">Create team</button>
-          <span id="team-status" class="form-status"></span>
-        </div>
-      </form>
-      <label class="request-field">Round topic<textarea id="team-round-topic" rows="2" placeholder="What should the team discuss in the next round?"></textarea></label>
+      <div class="team-control-grid">
+        <form id="team-form" class="workflow-form team-control-card">
+          <div class="panel-head">
+            <h3>Create team</h3>
+            <span class="meta">Template sets members and starter tasks</span>
+          </div>
+          <div class="form-row">
+            <label>Workspace<input id="team-workspace" placeholder="/absolute/path/to/project" required></label>
+            <label>Lead<input id="team-lead" value="lead" placeholder="lead"></label>
+            <label>Template<select id="team-template"><option value="">Custom team</option></select></label>
+          </div>
+          <div class="form-row">
+            <label>Members<input id="team-members" value="planner:claude,coder:claude,reviewer:codex-cli" placeholder="planner:claude,coder:claude"></label>
+            <label>Max running<input id="team-max-running" type="number" min="1" step="1" placeholder="template default"></label>
+            <label>Max tasks<input id="team-max-tasks" type="number" min="1" step="1" placeholder="template default"></label>
+          </div>
+          <label class="request-field">Goal<textarea id="team-goal" rows="2" placeholder="Describe the team goal" required></textarea></label>
+          <div class="team-options">
+            <label title="Start eligible tasks immediately after creating from a template."><input id="team-auto-start" type="checkbox">Auto start</label>
+            <label title="Create a merger task after base tasks finish."><input id="team-auto-merge" type="checkbox" checked>Auto merge</label>
+          </div>
+          <div class="form-actions">
+            <button id="team-submit" type="submit">Create team</button>
+            <span id="team-status" class="form-status"></span>
+          </div>
+        </form>
+        <section class="team-control-card" id="team-round-panel">
+          <div class="panel-head">
+            <h3>Team round</h3>
+            <span id="team-selected-summary" class="meta">No team selected</span>
+          </div>
+          <label class="request-field">Round topic<textarea id="team-round-topic" rows="3" placeholder="Align on plan, risks, blockers, or next tasks"></textarea></label>
+          <div class="team-options">
+            <label title="Call each member's configured provider for a read-only response."><input id="team-round-live-agents" type="checkbox">Live agents</label>
+            <label title="Create follow-up tasks from round messages."><input id="team-round-create-tasks" type="checkbox">Create tasks</label>
+          </div>
+          <div class="form-actions">
+            <button id="team-round-submit" type="button" disabled>Run round</button>
+            <span id="team-round-status" class="form-status"></span>
+          </div>
+        </section>
+      </div>
       <div class="team-layout">
         <div id="teams" class="team-list"></div>
         <div id="team-detail" class="team-detail"><span class="meta">Select a team to inspect members, messages, and shared tasks.</span></div>
@@ -813,8 +868,18 @@ h3 { font-size: 14px; margin-bottom: 8px; }
 .form-actions { display: flex; align-items: center; gap: 10px; }
 #workflow-submit { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
 .form-status { color: var(--muted); font-size: 13px; }
-.catalog, .providers, .stability, .task-preview, .team-panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
+.catalog, .providers, .stability, .task-preview, .quick-start, .team-panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: grid; gap: 10px; }
 .task-preview { align-content: start; }
+.quick-start { align-content: start; }
+.quick-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.quick-steps li { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; align-items: baseline; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #f8fafc; }
+.quick-steps strong { font-size: 12px; color: var(--text); }
+.quick-steps span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.quick-start-grid { display: grid; gap: 8px; }
+.quick-start-card { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; color: var(--text); cursor: pointer; text-align: left; display: grid; gap: 4px; }
+.quick-start-card:hover { border-color: var(--accent); background: #f0fdfa; }
+.quick-start-card strong { font-size: 13px; }
+.quick-start-card span { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .preview-content { display: grid; gap: 10px; }
 .preview-risk { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 700; text-transform: capitalize; background: #eef2f7; color: var(--muted); }
 .preview-risk.low { background: #dcfce7; color: var(--ok); }
@@ -925,6 +990,10 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .provider-summary-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fff; display: grid; gap: 4px; }
 .stability-task-list { display: grid; gap: 6px; margin-top: 8px; }
 .stability-task { display: grid; grid-template-columns: 96px 90px minmax(0, 1fr) 80px; gap: 8px; align-items: center; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; }
+.team-control-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr); gap: 12px; align-items: stretch; margin-bottom: 12px; }
+.team-control-card { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 12px; min-width: 0; display: grid; gap: 10px; }
+.team-control-card.workflow-form { margin: 0; }
+.team-control-card .panel-head { margin-bottom: 0; }
 .team-layout { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 12px; min-width: 0; }
 .team-options { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
 .team-options label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 650; }
@@ -936,8 +1005,9 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .team-detail { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 12px; display: grid; gap: 12px; }
 .team-section { display: grid; gap: 8px; }
 .team-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
-.team-card, .team-message, .team-task { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 9px; display: grid; gap: 4px; min-width: 0; }
+.team-card, .team-message, .team-task, .team-conflict, .team-memory { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 9px; display: grid; gap: 4px; min-width: 0; }
 .team-coordinator { border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; padding: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.conflict-panel { border-color: #fecaca; background: #fff7f7; padding: 8px; border-radius: 8px; }
 .team-round { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 9px; display: grid; gap: 8px; }
 .team-message.compact { background: #fff; padding: 7px; }
 .team-task.done { border-color: #bbf7d0; background: #f7fef9; }
@@ -945,7 +1015,7 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
 .team-task.blocked, .team-task.cancelled { border-color: #fecaca; background: #fff7f7; }
 .linked-task-chip { border: 1px solid #dbeafe; border-radius: 6px; background: #f8fbff; padding: 7px; display: grid; gap: 4px; }
 .team-task-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
-.team-message-list, .team-task-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.team-message-list, .team-task-list, .team-memory-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
 .team-section .team-round + .team-round { margin-top: 8px; }
 .team-inline-form { display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 8px; align-items: end; }
 .team-inline-form input, .team-inline-form textarea, .team-inline-form select { border: 1px solid var(--line); border-radius: 6px; padding: 7px; min-width: 0; }
@@ -962,7 +1032,7 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px
   .plan-unit { grid-template-columns: 1fr; }
   .workflow-step { grid-template-columns: 88px minmax(0, 1fr); }
   .workflow-step-body { grid-column: 1 / -1; }
-  .team-layout, .team-inline-form { grid-template-columns: 1fr; }
+  .team-control-grid, .team-layout, .team-inline-form { grid-template-columns: 1fr; }
 }
 
 :root {
@@ -1063,11 +1133,39 @@ pre { background: #0b1020; border: 1px solid #1e293b; }
 
 const DASHBOARD_JS = `const SIMPLE_COMMANDS = ["ultrawork", "start-work", "plan-work", "review-work", "explore"];
 const SIMPLE_COMMAND_SET = new Set(SIMPLE_COMMANDS);
+const QUICK_START_EXAMPLES = {
+  understand: {
+    command: "/ultrawork",
+    agent: "",
+    request: "Read this existing project and produce a detailed README-style explanation: purpose, tech stack, directory structure, core modules, startup flow, test flow, important configuration files, and key risks. Include concrete file paths and line references where useful. Do not modify files.",
+    verifyCommand: ""
+  },
+  feature: {
+    command: "/ultrawork",
+    agent: "",
+    request: "Implement this feature end to end. Create a plan first, split work when useful, modify the code, run relevant verification, and provide a final report with changed files and test results.",
+    verifyCommand: ""
+  },
+  bugfix: {
+    command: "/ultrawork",
+    agent: "",
+    request: "Fix this bug. First inspect the current behavior and likely root cause, then make the smallest safe code change, run verification, and summarize the root cause, patch, and remaining risks.",
+    verifyCommand: ""
+  },
+  long: {
+    command: "/ultrawork",
+    agent: "",
+    request: "Run this as a larger multi-agent workflow. Break the requirement into plan units, execute independent work in parallel where safe, review the result, repair failures automatically when verification is non-idempotent or flaky, and produce a final delivery report.",
+    verifyCommand: ""
+  }
+};
 
 const state = { tasks: [], teams: [], teamTemplates: [], commands: [], stabilityRuns: [], projectMemoryByWorkspace: {}, mode: "simple", selectedTaskId: undefined, selectedTeamId: undefined, filter: "", showChildren: false, selectedIoTab: undefined, lastPreview: undefined, capabilities: { liveTaskManager: false, liveTaskTools: false, liveStabilityRunner: false } };
 
 const els = {
   workflowPanel: document.getElementById("workflow-panel"),
+  quickStart: document.getElementById("quick-start"),
+  quickStartExamples: document.getElementById("quick-start-examples"),
   catalog: document.getElementById("catalog"),
   stabilityPanel: document.getElementById("stability-panel"),
   stabilityForm: document.getElementById("stability-form"),
@@ -1091,6 +1189,11 @@ const els = {
   teamAutoStart: document.getElementById("team-auto-start"),
   teamAutoMerge: document.getElementById("team-auto-merge"),
   teamRoundTopic: document.getElementById("team-round-topic"),
+  teamRoundLiveAgents: document.getElementById("team-round-live-agents"),
+  teamRoundCreateTasks: document.getElementById("team-round-create-tasks"),
+  teamRoundSubmit: document.getElementById("team-round-submit"),
+  teamRoundStatus: document.getElementById("team-round-status"),
+  teamSelectedSummary: document.getElementById("team-selected-summary"),
   teamSubmit: document.getElementById("team-submit"),
   teamStatus: document.getElementById("team-status"),
   teams: document.getElementById("teams"),
@@ -1164,6 +1267,18 @@ els.stabilityForm.addEventListener("submit", event => {
 els.teamForm.addEventListener("submit", event => {
   event.preventDefault();
   submitTeam();
+});
+els.teamRoundSubmit.addEventListener("click", () => {
+  if (!state.selectedTeamId) {
+    els.teamRoundStatus.textContent = "Select a team first";
+    return;
+  }
+  runTeamRound(state.selectedTeamId);
+});
+els.quickStartExamples.addEventListener("click", event => {
+  const button = event.target.closest("[data-quick-start]");
+  if (!button) return;
+  applyQuickStart(button.dataset.quickStart);
 });
 for (const field of els.form.querySelectorAll("input, textarea, select")) {
   field.addEventListener("input", scheduleTaskPreview);
@@ -1329,6 +1444,32 @@ function applyRecommendedSetup() {
   scheduleTaskPreview();
 }
 
+function applyQuickStart(key) {
+  const example = QUICK_START_EXAMPLES[key];
+  if (!example) return;
+  setMode("simple");
+  setTab("command");
+  setWorkflowCommand(example.command);
+  els.agent.value = example.agent || "";
+  els.request.value = example.request || "";
+  els.verifyCommand.value = example.verifyCommand || "";
+  els.formStatus.textContent = "Template applied. Fill workspace, adjust request, then run.";
+  scheduleTaskPreview();
+  els.workspace.focus();
+}
+
+function setWorkflowCommand(command) {
+  if (!command) return;
+  const existing = Array.from(els.command.options).some(option => option.value === command);
+  if (!existing) {
+    const option = document.createElement("option");
+    option.value = command;
+    option.textContent = command;
+    els.command.appendChild(option);
+  }
+  els.command.value = command;
+}
+
 function renderTaskPreview(preview) {
   if (!preview) return '<span class="meta">No preview available.</span>';
   const warnings = preview.warnings || [];
@@ -1382,6 +1523,7 @@ async function loadCapabilities() {
   const data = await response.json();
   state.capabilities = data;
   els.workflowPanel.hidden = !data.liveTaskTools;
+  els.quickStart.hidden = !data.liveTaskTools;
   els.taskPreview.hidden = !data.liveTaskTools;
   els.catalog.hidden = !data.liveTaskTools;
   els.providers.hidden = !data.liveTaskTools;
@@ -1474,8 +1616,10 @@ function renderTeams() {
   if (state.teams.length === 0) {
     els.teams.innerHTML = '<span class="meta">No teams yet.</span>';
     els.teamDetail.innerHTML = '<span class="meta">Create a team to coordinate agent messages and shared tasks.</span>';
+    renderTeamRoundSelection(undefined);
     return;
   }
+  renderTeamRoundSelection(state.teams.find(team => team.id === state.selectedTeamId));
   els.teams.innerHTML = state.teams.map(team => \`
     <button class="team-row \${team.id === state.selectedTeamId ? "active" : ""}" type="button" data-team-id="\${escapeAttr(team.id)}">
       <strong>\${escapeHtml(team.goal || team.id)}</strong>
@@ -1486,6 +1630,14 @@ function renderTeams() {
   for (const button of els.teams.querySelectorAll("[data-team-id]")) {
     button.addEventListener("click", () => loadTeamDetail(button.dataset.teamId));
   }
+}
+
+function renderTeamRoundSelection(team) {
+  if (!els.teamRoundSubmit || !els.teamSelectedSummary) return;
+  els.teamRoundSubmit.disabled = !team;
+  els.teamSelectedSummary.textContent = team
+    ? [team.id, String((team.members || []).length) + " members", String((team.tasks || []).length) + " tasks"].join(" / ")
+    : "No team selected";
 }
 
 async function loadTeamDetail(teamId) {
@@ -1515,6 +1667,8 @@ function renderTeamDetail(team, linkedTasks) {
       \${renderTeamBudget(team.budget)}
       \${renderTeamCoordinator(team)}
     </div>
+    \${renderTeamConflicts(team.conflicts || [])}
+    \${renderTeamMemory(team.memory || [], members)}
     <div class="team-section">
       <h3>Collaboration timeline</h3>
       \${renderTeamTimeline(messages)}
@@ -1525,6 +1679,8 @@ function renderTeamDetail(team, linkedTasks) {
         <div class="team-card">
           <strong>\${escapeHtml(member.id || member.role)}</strong>
           <span class="meta">\${escapeHtml([member.role, member.profile, member.agent, member.status].filter(Boolean).join(" / "))}</span>
+          \${member.summary ? '<span class="meta">' + escapeHtml(member.summary) + '</span>' : ''}
+          \${member.memory?.length ? '<span class="meta">memory ' + escapeHtml(String(member.memory.length)) + '</span>' : ''}
         </div>
       \`).join("") || '<span class="meta">No members.</span>'}</div>
     </div>
@@ -1571,6 +1727,8 @@ function renderTeamDetail(team, linkedTasks) {
   if (coordinatorButton) coordinatorButton.addEventListener("click", () => runTeamCoordinator(team.id));
   const roundButton = els.teamDetail.querySelector("[data-run-team-round]");
   if (roundButton) roundButton.addEventListener("click", () => runTeamRound(team.id));
+  const autonomyButton = els.teamDetail.querySelector("[data-run-team-autonomy]");
+  if (autonomyButton) autonomyButton.addEventListener("click", () => runTeamAutonomy(team.id));
   for (const button of els.teamDetail.querySelectorAll("[data-start-team-task]")) {
     button.addEventListener("click", () => startTeamTask(team.id, button.dataset.startTeamTask));
   }
@@ -1598,6 +1756,40 @@ function renderTeamCoordinator(team) {
       <span class="meta">\${escapeHtml([coordinator.autoStart ? "auto-start" : "", coordinator.autoMerge ? "auto-merge" : "", coordinator.lastAction || ""].filter(Boolean).join(" / "))}</span>
       <button class="secondary-button" type="button" data-run-team-coordinator>Run coordinator</button>
       <button class="secondary-button" type="button" data-run-team-round>Run team round</button>
+      <button class="secondary-button" type="button" data-run-team-autonomy>Run autonomy loop</button>
+    </div>
+  \`;
+}
+
+function renderTeamConflicts(conflicts) {
+  const open = conflicts.filter(conflict => conflict.status === "open");
+  if (!open.length) return "";
+  return \`
+    <div class="team-section conflict-panel">
+      <h3>Open conflicts</h3>
+      \${open.map(conflict => \`
+        <div class="team-conflict">
+          <strong>\${escapeHtml(conflict.file)}</strong>
+          <span class="meta">\${escapeHtml([conflict.teamTaskIds?.join(", "), conflict.taskIds?.join(", "), conflict.arbitrationTaskId ? "arbitrate " + conflict.arbitrationTaskId : ""].filter(Boolean).join(" / "))}</span>
+        </div>
+      \`).join("")}
+    </div>
+  \`;
+}
+
+function renderTeamMemory(memory, members) {
+  const latest = memory.slice().reverse().slice(0, 8);
+  if (!latest.length && !members.some(member => member.memory?.length)) return "";
+  return \`
+    <div class="team-section">
+      <h3>Team memory</h3>
+      <div class="team-memory-list">\${latest.map(item => \`
+        <div class="team-memory">
+          <strong>\${escapeHtml(item.scope === "member" && item.memberId ? item.memberId : "team")}</strong>
+          <span>\${escapeHtml(item.body || "")}</span>
+          <span class="meta">\${escapeHtml(item.createdAt || "")}</span>
+        </div>
+      \`).join("") || '<span class="meta">No memory yet.</span>'}</div>
     </div>
   \`;
 }
@@ -1638,19 +1830,46 @@ async function runTeamCoordinator(teamId) {
   await loadTasks();
 }
 
-async function runTeamRound(teamId) {
-  const topic = els.teamRoundTopic.value.trim();
-  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/round-run", {
+async function runTeamAutonomy(teamId) {
+  const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/autonomy-run", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ topic: topic || undefined })
+    body: JSON.stringify({ cycles: 3, liveAgents: true, createTasks: false, autoStart: true, autoMerge: true })
   });
   const data = await response.json();
   if (!data.ok) {
-    alert(data.error || "Failed to run team round");
+    alert(data.error || "Failed to run team autonomy loop");
     return;
   }
   await loadTeams();
+  await loadTasks();
+}
+
+async function runTeamRound(teamId) {
+  const topic = els.teamRoundTopic.value.trim();
+  els.teamRoundStatus.textContent = els.teamRoundLiveAgents.checked ? "Running live agents..." : "Running round...";
+  els.teamRoundSubmit.disabled = true;
+  try {
+    const response = await fetch("/api/teams/" + encodeURIComponent(teamId) + "/round-run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        topic: topic || undefined,
+        liveAgents: els.teamRoundLiveAgents.checked,
+        createTasks: els.teamRoundCreateTasks.checked
+      })
+    });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "Failed to run team round");
+    const generated = data.round?.generatedTasks?.length || 0;
+    els.teamRoundStatus.textContent = generated ? "Round complete, tasks created: " + generated : "Round complete";
+    await loadTeams();
+  } catch (error) {
+    els.teamRoundStatus.textContent = error.message || String(error);
+  } finally {
+    const team = state.teams.find(item => item.id === teamId);
+    els.teamRoundSubmit.disabled = !team;
+  }
 }
 
 function renderLinkedTeamTask(task) {
@@ -1829,6 +2048,10 @@ function renderProviders(data) {
         <strong>\${escapeHtml(check.provider)}</strong>
         <span class="meta">\${escapeHtml(check.status)}</span>
         <span class="meta">\${escapeHtml(check.version || check.error || check.command || "")}</span>
+        \${check.requestedModel ? '<span class="meta">requested: ' + escapeHtml(check.requestedModel) + '</span>' : ''}
+        \${check.model ? '<span class="meta">model: ' + escapeHtml(check.model) + '</span>' : ''}
+        \${check.modelStatus ? '<span class="meta">model status: ' + escapeHtml(check.modelStatus) + '</span>' : ''}
+        \${check.modelError ? '<span class="meta">' + escapeHtml(check.modelError) + '</span>' : ''}
       </div>
     \`).join("")}</div>
     <details class="language-servers">

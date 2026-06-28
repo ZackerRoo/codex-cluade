@@ -3,10 +3,32 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import type { AgentProvider } from "../src/agents/AgentProvider.js";
 import { createTaskManager, createTaskTools, runClaudeStageTool, type TaskToolSet } from "../src/mcp/tools.js";
+import type { AgentName, DelegatedTask, StageInput, StageResult } from "../src/types.js";
+import { AgentCoordinator } from "../src/workflow/AgentCoordinator.js";
 import { ProjectMemoryStore } from "../src/workflow/ProjectMemory.js";
 import { TeamStore } from "../src/workflow/TeamStore.js";
+import { TaskManager } from "../src/workflow/TaskManager.js";
 import { TaskStore } from "../src/workflow/TaskStore.js";
+
+class RoundFakeProvider implements AgentProvider {
+  constructor(readonly name: AgentName) {}
+
+  async run(input: StageInput): Promise<StageResult> {
+    const member = /Your member id: ([^\n]+)/.exec(input.request)?.[1] ?? this.name;
+    return {
+      ok: true,
+      runId: input.runId ?? "round-fake",
+      stage: input.stage,
+      agent: this.name,
+      status: "completed",
+      changedFiles: [],
+      requiresCodex: false,
+      summary: `agent response for ${member}`
+    };
+  }
+}
 
 describe("runClaudeStageTool", () => {
   it("returns structured content and text for successful Claude stages", async () => {
@@ -217,7 +239,7 @@ describe("delegate task MCP tools", () => {
         exec: async (_command, _args, options) => ({
           code: 0,
           stdout: JSON.stringify({
-            result: (options.input ?? "").includes("Create an implementation plan")
+            result: (options.input ?? "").includes("Stage: plan")
               ? "- [ ] Create index.html\n- [ ] Add controls\n- [ ] Verify output"
               : "implemented from ultrawork plan"
           }),
@@ -239,13 +261,15 @@ describe("delegate task MCP tools", () => {
     assert.equal(result.structuredContent?.command, "ultrawork");
     assert.equal(result.structuredContent?.planId, "ultrawork-plan");
     assert.equal(result.structuredContent?.taskId, "ultrawork-run");
-    assert.deepEqual(result.structuredContent?.childTaskIds, [
-      "ultrawork-run-part-1",
-      "ultrawork-run-part-2",
-      "ultrawork-run-part-3",
-      "ultrawork-run-review"
-    ]);
-    assert.equal(result.structuredContent?.reviewTaskId, "ultrawork-run-review");
+    assert.equal(result.structuredContent?.planningTaskId, "ultrawork-run-plan");
+    assert.deepEqual(result.structuredContent?.childTaskIds, ["ultrawork-run-plan"]);
+    await waitFor(() => {
+      const status = tools.taskStatusTool({ taskId: "ultrawork-run" });
+      return status.then(result => {
+        const childTaskIds = result.structuredContent?.childTaskIds as string[] | undefined;
+        return childTaskIds?.includes("ultrawork-run-review") === true;
+      });
+    });
     const status = await tools.taskStatusTool({ taskId: "ultrawork-run" });
     assert.deepEqual(status.structuredContent?.childTaskIds, [
       "ultrawork-run-part-1",
@@ -294,7 +318,7 @@ describe("delegate task MCP tools", () => {
         exec: async (_command, _args, options) => ({
           code: 0,
           stdout: JSON.stringify({
-            result: (options.input ?? "").includes("Create an implementation plan")
+            result: (options.input ?? "").includes("Stage: plan")
               ? "- [ ] Create index.html\n- [ ] Create app.js"
               : "implemented web game"
           }),
@@ -313,10 +337,9 @@ describe("delegate task MCP tools", () => {
     });
 
     assert.equal(result.structuredContent?.ok, true);
-    const task = result.structuredContent?.task as { verifyCommand?: string } | undefined;
-    assert.match(task?.verifyCommand ?? "", /verify-web/);
-    assert.match(task?.verifyCommand ?? "", /#map > \*/);
-    assert.match(task?.verifyCommand ?? "", /#action-grid button/);
+    assert.match(String(result.structuredContent?.verifyCommand ?? ""), /verify-web/);
+    assert.match(String(result.structuredContent?.verifyCommand ?? ""), /#map > \*/);
+    assert.match(String(result.structuredContent?.verifyCommand ?? ""), /#action-grid button/);
   });
 
   it("caps long ultrawork plans into implementation batches", async () => {
@@ -329,7 +352,7 @@ describe("delegate task MCP tools", () => {
         exec: async (_command, _args, options) => ({
           code: 0,
           stdout: JSON.stringify({
-            result: (options.input ?? "").includes("Create an implementation plan")
+            result: (options.input ?? "").includes("Stage: plan")
               ? checklist
               : "implemented from capped ultrawork plan"
           }),
@@ -348,7 +371,15 @@ describe("delegate task MCP tools", () => {
     });
 
     assert.equal(result.structuredContent?.ok, true);
-    assert.deepEqual(result.structuredContent?.childTaskIds, [
+    await waitFor(() => {
+      const status = tools.taskStatusTool({ taskId: "ultrawork-cap-run" });
+      return status.then(result => {
+        const childTaskIds = result.structuredContent?.childTaskIds as string[] | undefined;
+        return childTaskIds?.includes("ultrawork-cap-run-review") === true;
+      });
+    });
+    const workflowStatus = await tools.taskStatusTool({ taskId: "ultrawork-cap-run" });
+    assert.deepEqual(workflowStatus.structuredContent?.childTaskIds, [
       "ultrawork-cap-run-part-1",
       "ultrawork-cap-run-part-2",
       "ultrawork-cap-run-part-3",
@@ -1141,6 +1172,136 @@ describe("delegate task MCP tools", () => {
     assert.equal(content.team?.messages?.length, 4);
   });
 
+  it("runs live agent Team Mode rounds and can create follow-up tasks", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-live-round-test-"));
+    const manager = new TaskManager(new AgentCoordinator({
+      providers: { claude: new RoundFakeProvider("claude") }
+    }), new TaskStore({ rootDir: join(rootDir, "tasks") }));
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+    await tools.teamCreateTool({
+      teamId: "live-round-team",
+      workspace: "/tmp/project",
+      goal: "Plan a safe migration",
+      members: [
+        { id: "planner", role: "planning", profile: "planner", agent: "claude" },
+        { id: "reviewer", role: "review", profile: "reviewer", agent: "claude" }
+      ]
+    });
+
+    const round = await tools.teamRoundRunTool({
+      teamId: "live-round-team",
+      topic: "Decide migration steps",
+      participants: ["planner", "reviewer"],
+      liveAgents: true,
+      createTasks: true,
+      maxGeneratedTasks: 2
+    });
+
+    assert.equal(round.structuredContent?.ok, true);
+    const content = round.structuredContent as {
+      round?: {
+        liveAgents?: boolean;
+        generatedTasks?: Array<{ title?: string; assignee?: string }>;
+        messages?: Array<{ body?: string; taskId?: string }>;
+        agentResults?: Array<{ agent?: string; stage?: string; summary?: string }>;
+      };
+      team?: { tasks?: Array<{ title?: string; assignee?: string }>; messages?: Array<{ body?: string; taskId?: string }> };
+    };
+    assert.equal(content.round?.liveAgents, true);
+    assert.equal(content.round?.messages?.length, 2);
+    assert.match(content.round?.messages?.[0]?.body ?? "", /agent response/);
+    assert.equal(content.round?.agentResults?.length, 2);
+    assert.equal(content.round?.agentResults?.every(result => result.agent === "claude"), true);
+    assert.match(content.round?.agentResults?.[0]?.summary ?? "", /agent response/);
+    assert.equal(content.round?.generatedTasks?.length, 2);
+    assert.equal(content.team?.tasks?.length, 2);
+    assert.match(content.team?.tasks?.[0]?.title ?? "", /Follow up from planner/);
+    assert.equal(content.team?.tasks?.[1]?.assignee, "reviewer");
+  });
+
+  it("runs a bounded Team Mode autonomy loop and records memory", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-autonomy-test-"));
+    const manager = new TaskManager(new AgentCoordinator({
+      providers: { claude: new RoundFakeProvider("claude") }
+    }), new TaskStore({ rootDir: join(rootDir, "tasks") }));
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+    await tools.teamCreateTool({
+      teamId: "autonomy-team",
+      workspace: "/tmp/project",
+      goal: "Coordinate a release fix",
+      members: [
+        { id: "planner", role: "planning", profile: "planner", agent: "claude" },
+        { id: "coder", role: "implementation", profile: "coder", agent: "claude" }
+      ]
+    });
+
+    const autonomy = await tools.teamAutonomyRunTool({
+      teamId: "autonomy-team",
+      cycles: 2,
+      liveAgents: true,
+      createTasks: false,
+      autoStart: false
+    });
+
+    assert.equal(autonomy.structuredContent?.ok, true);
+    const content = autonomy.structuredContent as {
+      cycles?: Array<{ roundId?: string }>;
+      team?: { memory?: Array<{ body?: string }>; members?: Array<{ id?: string; memory?: string[]; summary?: string }> };
+    };
+    assert.equal(content.cycles?.length, 1);
+    assert.match(content.cycles?.[0]?.roundId ?? "", /autonomy-team-round-/);
+    assert.ok((content.team?.memory?.length ?? 0) >= 2);
+    assert.match(content.team?.members?.find(member => member.id === "planner")?.summary ?? "", /agent response/);
+  });
+
+  it("detects team file conflicts and creates an arbitration task", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-conflict-test-"));
+    const taskStore = new TaskStore({ rootDir: join(rootDir, "tasks") });
+    const manager = new TaskManager(new AgentCoordinator({ providers: {} }), taskStore);
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(rootDir, "teams") })
+    });
+    await tools.teamCreateTool({
+      teamId: "conflict-team",
+      workspace: "/tmp/project",
+      goal: "Parallel edit same module",
+      members: [
+        { id: "coder-a", role: "implementation", profile: "coder", agent: "claude" },
+        { id: "coder-b", role: "implementation", profile: "coder", agent: "claude" },
+        { id: "merger", role: "merge", profile: "coder", agent: "claude" }
+      ]
+    });
+    const first = await tools.teamTaskCreateTool({ teamId: "conflict-team", title: "Edit cache A", assignee: "coder-a" });
+    const second = await tools.teamTaskCreateTool({ teamId: "conflict-team", title: "Edit cache B", assignee: "coder-b" });
+    const firstId = (first.structuredContent as { task?: { id?: string } }).task?.id ?? "";
+    const secondId = (second.structuredContent as { task?: { id?: string } }).task?.id ?? "";
+    taskStore.save(fakeCompletedTask("delegate-a", ["src/cache.ts"]));
+    taskStore.save(fakeCompletedTask("delegate-b", ["src/cache.ts"]));
+    await tools.teamTaskUpdateTool({ teamId: "conflict-team", taskId: firstId, status: "done", linkedTaskId: "delegate-a" });
+    await tools.teamTaskUpdateTool({ teamId: "conflict-team", taskId: secondId, status: "done", linkedTaskId: "delegate-b" });
+
+    const coordinated = await tools.teamCoordinatorRunTool({ teamId: "conflict-team", autoStart: false });
+
+    assert.equal(coordinated.structuredContent?.ok, true);
+    const content = coordinated.structuredContent as {
+      phase?: string;
+      conflicts?: Array<{ file?: string; arbitrationTaskId?: string }>;
+      team?: { tasks?: Array<{ title?: string; assignee?: string }> };
+    };
+    assert.equal(content.phase, "conflict");
+    assert.equal(content.conflicts?.[0]?.file, "src/cache.ts");
+    assert.ok(content.conflicts?.[0]?.arbitrationTaskId);
+    assert.match(content.team?.tasks?.at(-1)?.title ?? "", /Conflict arbitration/);
+    assert.equal(content.team?.tasks?.at(-1)?.assignee, "merger");
+  });
+
   it("enforces Team Mode allowed-agent budget", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "bridge-team-budget-test-"));
     const tools = createTaskTools({ teamStore: new TeamStore({ rootDir }) });
@@ -1165,6 +1326,7 @@ async function createTestTaskTools(options: Parameters<typeof createTaskTools>[0
   const rootDir = await mkdtemp(join(tmpdir(), "bridge-mcp-task-store-"));
   return createTaskTools({
     ...options,
+    probeProviderModels: options.probeProviderModels ?? false,
     taskStore: new TaskStore({ rootDir }),
     teamStore: options.teamStore ?? new TeamStore({ rootDir: join(rootDir, "teams") })
   });
@@ -1177,4 +1339,30 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 3000): Pro
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.fail("Timed out waiting for condition");
+}
+
+function fakeCompletedTask(id: string, changedFiles: string[]): DelegatedTask {
+  return {
+    id,
+    mode: "background",
+    status: "completed",
+    workspace: "/tmp/project",
+    request: `Task ${id}`,
+    stages: ["implement"],
+    preferredAgent: "claude",
+    runId: id,
+    createdAt: "2026-06-15T00:00:00.000Z",
+    updatedAt: "2026-06-15T00:01:00.000Z",
+    resultSummary: {
+      kind: "task",
+      status: "completed",
+      stages: ["implement"],
+      summary: `Completed ${id}`,
+      changedFiles,
+      agentSessions: [],
+      durationMs: 1000,
+      nextSteps: [],
+      providerAttempts: ["claude"]
+    }
+  };
 }

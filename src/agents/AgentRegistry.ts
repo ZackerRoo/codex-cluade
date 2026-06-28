@@ -180,7 +180,7 @@ const profiles: Record<string, AgentProfile> = {
     category: "planning",
     agent: "claude",
     stages: ["plan"],
-    permission: { mode: "default", disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"] },
+    permission: { mode: "default", disallowedTools: ["Edit", "Write", "NotebookEdit"] },
     rolePrompt: "You are Prometheus. Create a high-quality implementation plan. Clarify scope, identify guardrails, include exact files or areas to inspect, and produce markdown checklist steps. Do not edit source files."
   },
   sisyphus: {
@@ -199,7 +199,7 @@ const profiles: Record<string, AgentProfile> = {
     category: "review",
     agent: "claude",
     stages: ["review"],
-    permission: { mode: "default", disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"] },
+    permission: { mode: "default", disallowedTools: ["Edit", "Write", "NotebookEdit"] },
     fallbacks: [{ agent: "codex-cli", effort: "medium" }, { agent: "gemini" }, { agent: "myflicker", effort: "medium" }, { agent: "codex" }],
     rolePrompt: "You are Momus. Be a strict reviewer. Prioritize correctness bugs, regressions, missing tests, unclear assumptions, and incomplete verification. Return findings first with concrete file or plan references."
   },

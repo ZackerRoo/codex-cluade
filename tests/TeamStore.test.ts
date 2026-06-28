@@ -37,5 +37,23 @@ describe("TeamStore", () => {
     const reloaded = new TeamStore({ rootDir }).get(team.id);
     assert.equal(reloaded?.messages.length, 1);
     assert.equal(reloaded?.tasks[0]?.linkedTaskId, "delegate-1");
+
+    const memory = store.addMemory({ teamId: team.id, scope: "member", memberId: "coder", body: "Use repository auth helpers." });
+    assert.equal(memory?.memberId, "coder");
+    const member = store.updateMember({ teamId: team.id, memberId: "coder", summary: "Auth helper owner", memory: ["Use repository auth helpers."] });
+    assert.equal(member?.summary, "Auth helper owner");
+    store.setConflicts(team.id, [{
+      id: "conflict-1",
+      file: "src/auth.ts",
+      taskIds: ["delegate-1", "delegate-2"],
+      teamTaskIds: ["team-test-task-1", "team-test-task-2"],
+      status: "open",
+      createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:00.000Z"
+    }]);
+    const reloadedWithMemory = new TeamStore({ rootDir }).get(team.id);
+    assert.equal(reloadedWithMemory?.memory?.length, 1);
+    assert.equal(reloadedWithMemory?.members.find(item => item.id === "coder")?.memory?.[0], "Use repository auth helpers.");
+    assert.equal(reloadedWithMemory?.conflicts?.[0]?.file, "src/auth.ts");
   });
 });

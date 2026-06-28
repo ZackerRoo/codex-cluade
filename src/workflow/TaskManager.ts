@@ -11,6 +11,7 @@ import { evaluateTaskGuardrails } from "./TaskGuardrails.js";
 import { WorkflowStateStore } from "./WorkflowStateStore.js";
 import { execShellCapture, type ExecResult } from "../utils/exec.js";
 import { createGitCheckpoint, createGitDiff, rollbackGitTaskChanges } from "../utils/git.js";
+import { createWorkspaceSnapshot, diffWorkspaceSnapshots, type WorkspaceSnapshot } from "../utils/workspaceSnapshot.js";
 
 type VerificationExec = (command: string, options: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<ExecResult>;
 
@@ -84,6 +85,7 @@ interface StoredTask extends DelegatedTask {
 
 export class TaskManager {
   private readonly tasks = new Map<string, StoredTask>();
+  private readonly workspaceSnapshots = new Map<string, WorkspaceSnapshot>();
 
   constructor(
     private readonly coordinator: AgentCoordinator,
@@ -390,6 +392,9 @@ export class TaskManager {
     task.status = "running";
     task.updatedAt = new Date().toISOString();
     task.gitCheckpoint = await createGitCheckpoint(task.workspace);
+    if (!task.gitCheckpoint.supported) {
+      this.workspaceSnapshots.set(task.id, await createWorkspaceSnapshot(task.workspace));
+    }
     task.rollback = rollbackStateFor(task);
     this.saveTask(task);
     try {
@@ -565,18 +570,22 @@ export class TaskManager {
         ? "completed"
         : "running";
     const childrenWithSummaries = children.map(child => withDerivedTaskMetadata(child));
-    const workflowState = new WorkflowStateStore(task.workspace).updateFromTasks(task.id, childrenWithSummaries, {
+    const visibleStatus = workflowStatus(task, status);
+    const workflowStore = new WorkflowStateStore(task.workspace);
+    const existingWorkflowState = workflowStore.get(task.id);
+    const workflowState = workflowStore.updateFromTasks(task.id, childrenWithSummaries, {
         request: task.request,
         planId: task.planId,
         planPath: task.planPath,
         childTaskIds,
-        reviewTaskId
+        reviewTaskId,
+        persist: !isTerminalStatus(visibleStatus) || Boolean(existingWorkflowState)
       });
     let updated: DelegatedTask = {
       ...task,
       childTaskIds,
       reviewTaskId,
-      status: workflowStatus(task, status),
+      status: visibleStatus,
       workflow: {
         kind: "ultrawork" as const,
         summary,
@@ -686,7 +695,7 @@ export class TaskManager {
       }
     }
 
-    nextTask.gitDiff = await createGitDiff(nextTask.workspace);
+    nextTask.gitDiff = await this.createTaskDiff(nextTask);
     nextTask.rollback = rollbackStateFor(nextTask);
     nextTask.guardrails = await evaluateTaskGuardrails(nextTask);
     const guardrailError = nextTask.guardrails.find(issue => issue.severity === "error");
@@ -789,8 +798,22 @@ export class TaskManager {
   }
 
   private async refreshGitDiff(task: StoredTask): Promise<void> {
-    task.gitDiff = await createGitDiff(task.workspace);
+    task.gitDiff = await this.createTaskDiff(task);
     task.rollback = rollbackStateFor(task);
+  }
+
+  private async createTaskDiff(task: DelegatedTask): Promise<NonNullable<DelegatedTask["gitDiff"]>> {
+    const gitDiff = await createGitDiff(task.workspace);
+    if (gitDiff.supported) return gitDiff;
+    const before = this.workspaceSnapshots.get(task.id);
+    if (!before) return gitDiff;
+    const after = await createWorkspaceSnapshot(task.workspace);
+    const files = diffWorkspaceSnapshots(before, after);
+    return {
+      ...gitDiff,
+      files,
+      error: files.length > 0 ? "Workspace is not a git repository; using file snapshot fallback." : gitDiff.error
+    };
   }
 
   private saveRollbackResult(task: DelegatedTask, status: "completed" | "failed", error?: string): DelegatedTask {

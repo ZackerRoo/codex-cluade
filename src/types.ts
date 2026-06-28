@@ -233,7 +233,7 @@ export interface ProjectMemory {
 
 export type TeamMemberStatus = "active" | "idle" | "done" | "blocked";
 export type TeamTaskStatus = "todo" | "in_progress" | "done" | "blocked" | "cancelled";
-export type TeamCoordinatorPhase = "idle" | "running" | "merging" | "completed" | "blocked";
+export type TeamCoordinatorPhase = "idle" | "running" | "merging" | "completed" | "blocked" | "conflict";
 
 export interface TeamMember {
   id: string;
@@ -242,6 +242,7 @@ export interface TeamMember {
   agent?: AgentName;
   status: TeamMemberStatus;
   summary?: string;
+  memory?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -265,6 +266,26 @@ export interface TeamTask {
   assignee?: string;
   status: TeamTaskStatus;
   linkedTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamMemoryEntry {
+  id: string;
+  scope: "team" | "member";
+  memberId?: string;
+  body: string;
+  sourceMessageId?: string;
+  createdAt: string;
+}
+
+export interface TeamConflict {
+  id: string;
+  file: string;
+  taskIds: string[];
+  teamTaskIds: string[];
+  status: "open" | "resolved";
+  arbitrationTaskId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -301,6 +322,8 @@ export interface AgentTeam {
   members: TeamMember[];
   messages: TeamMessage[];
   tasks: TeamTask[];
+  memory?: TeamMemoryEntry[];
+  conflicts?: TeamConflict[];
   createdAt: string;
   updatedAt: string;
 }

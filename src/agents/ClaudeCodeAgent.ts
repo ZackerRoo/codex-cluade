@@ -5,6 +5,7 @@ import { buildStagePrompt } from "../prompts/stagePrompts.js";
 import { ResultStore } from "../storage/ResultStore.js";
 import { execFileCapture, type ExecResult } from "../utils/exec.js";
 import { changedFiles } from "../utils/git.js";
+import { loadShellClaudeEnv, resolveDefaultClaudeModel } from "../config/ClaudeSettings.js";
 import { resolveClaudeSessionInfo } from "./ClaudeSessionResolver.js";
 
 type ExecFn = (
@@ -13,6 +14,7 @@ type ExecFn = (
   options: {
     cwd: string;
     timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
     input?: string;
     signal?: AbortSignal;
     onStdoutChunk?: (chunk: string) => void;
@@ -23,22 +25,23 @@ type ExecFn = (
 export interface ClaudeCodeAgentOptions {
   claudePath?: string;
   defaultModel?: string;
+  refreshShellEnv?: boolean;
   exec?: ExecFn;
   getChangedFiles?: (workspace: string) => Promise<string[]>;
 }
-
-const DEFAULT_CLAUDE_MODEL = "pa/claude-opus-4-7";
 
 export class ClaudeCodeAgent implements AgentProvider {
   readonly name = "claude" as const;
   private readonly claudePath: string;
   private readonly defaultModel: string;
+  private readonly refreshShellEnv: boolean;
   private readonly exec: ExecFn;
   private readonly getChangedFiles: (workspace: string) => Promise<string[]>;
 
   constructor(options: ClaudeCodeAgentOptions = {}) {
     this.claudePath = options.claudePath ?? "claude";
-    this.defaultModel = options.defaultModel ?? process.env.CODEX_CLAUDE_MODEL ?? DEFAULT_CLAUDE_MODEL;
+    this.defaultModel = resolveDefaultClaudeModel({ configuredModel: options.defaultModel });
+    this.refreshShellEnv = options.refreshShellEnv ?? !options.exec;
     this.exec = options.exec ?? execFileCapture;
     this.getChangedFiles = options.getChangedFiles ?? changedFiles;
   }
@@ -51,7 +54,7 @@ export class ClaudeCodeAgent implements AgentProvider {
     const logPath = await store.writeLog(runId, `claude-${input.stage}.log`, "");
     const stdoutPath = await store.writeLog(runId, `claude-${input.stage}.stdout.jsonl`, "");
     const stderrPath = await store.writeLog(runId, `claude-${input.stage}.stderr.log`, "");
-    const defaultDisallowedTools = input.stage === "implement" ? [] : ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+    const defaultDisallowedTools = input.stage === "implement" ? [] : ["Edit", "Write", "NotebookEdit"];
     const permissionMode = input.permission?.mode ?? (input.stage === "implement" ? "bypassPermissions" : "default");
     const allowedTools = input.permission?.allowedTools ?? [];
     const disallowedTools = input.permission?.disallowedTools ?? defaultDisallowedTools;
@@ -81,9 +84,11 @@ export class ClaudeCodeAgent implements AgentProvider {
     if (input.effort) args.push("--effort", input.effort);
 
     const startedAt = new Date();
+    const refreshedEnv = this.refreshShellEnv ? await loadShellClaudeEnv(input.workspace) : undefined;
     const result = await this.exec(this.claudePath, args, {
       cwd: input.workspace,
       timeoutMs: input.timeoutMs ?? 15 * 60 * 1000,
+      env: refreshedEnv,
       input: prompt,
       signal: input.signal,
       onStdoutChunk: chunk => appendFileSync(stdoutPath, chunk, "utf8"),

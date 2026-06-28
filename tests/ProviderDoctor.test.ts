@@ -93,6 +93,114 @@ describe("ProviderDoctor", () => {
     assert.equal(byProvider.gemini.status, "ready");
   });
 
+  it("probes the bridge default Claude model when requested", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const doctor = new ProviderDoctor({
+      env: { CODEX_CLAUDE_SETTINGS_PATH: "/tmp/codex-claude-missing-settings.json" },
+      probeModels: true,
+      exec: async (command, args) => {
+        calls.push({ command, args });
+        if (command === "claude" && args.includes("-p")) {
+          return {
+            code: 0,
+            stdout: [
+              JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-8" }),
+              JSON.stringify({ type: "result", is_error: false, result: "ok" })
+            ].join("\n"),
+            stderr: "",
+            timedOut: false
+          };
+        }
+        return {
+          code: 0,
+          stdout: `${command} version\n`,
+          stderr: "",
+          timedOut: false
+        };
+      }
+    });
+
+    const result = await doctor.check();
+    const claude = result.checks.find(check => check.provider === "claude");
+
+    assert.equal(result.ok, true);
+    assert.equal(claude?.status, "ready");
+    assert.equal(claude?.model, "claude-opus-4-8");
+    assert.equal(claude?.modelStatus, "ready");
+    const probe = calls.find(call => call.command === "claude" && call.args.includes("-p"));
+    const modelIndex = probe?.args.indexOf("--model") ?? -1;
+    assert.notEqual(modelIndex, -1);
+    assert.equal(probe?.args[modelIndex + 1], "opus[1m]");
+  });
+
+  it("reports Claude rate limit retries before probe timeout", async () => {
+    const doctor = new ProviderDoctor({
+      env: { CODEX_CLAUDE_SETTINGS_PATH: "/tmp/codex-claude-missing-settings.json" },
+      probeModels: true,
+      exec: async (command, args) => {
+        if (command === "claude" && args.includes("-p")) {
+          return {
+            code: 0,
+            stdout: [
+              JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-8[1m]" }),
+              JSON.stringify({ type: "system", subtype: "api_retry", error: "rate_limit", error_status: 429 })
+            ].join("\n"),
+            stderr: "",
+            timedOut: true
+          };
+        }
+        return {
+          code: 0,
+          stdout: `${command} version\n`,
+          stderr: "",
+          timedOut: false
+        };
+      }
+    });
+
+    const result = await doctor.check();
+    const claude = result.checks.find(check => check.provider === "claude");
+
+    assert.equal(result.ok, false);
+    assert.equal(claude?.model, "claude-opus-4-8[1m]");
+    assert.equal(claude?.modelStatus, "failed");
+    assert.equal(claude?.modelError, "rate_limit (429); model probe timed out");
+  });
+
+  it("reports Claude model probe failures separately from CLI availability", async () => {
+    const doctor = new ProviderDoctor({
+      probeModels: true,
+      exec: async (command, args) => {
+        if (command === "claude" && args.includes("-p")) {
+          return {
+            code: 0,
+            stdout: [
+              JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-8[1m]" }),
+              JSON.stringify({ type: "result", is_error: true, result: "model_not_found" })
+            ].join("\n"),
+            stderr: "",
+            timedOut: false
+          };
+        }
+        return {
+          code: 0,
+          stdout: `${command} version\n`,
+          stderr: "",
+          timedOut: false
+        };
+      }
+    });
+
+    const result = await doctor.check();
+    const claude = result.checks.find(check => check.provider === "claude");
+
+    assert.equal(result.ok, false);
+    assert.equal(claude?.status, "ready");
+    assert.equal(claude?.model, "claude-opus-4-8[1m]");
+    assert.equal(claude?.modelStatus, "failed");
+    assert.equal(claude?.modelError, "model_not_found");
+  });
+
   it("treats language servers that reject --version as available", async () => {
     const doctor = new ProviderDoctor({
       exec: async command => ({

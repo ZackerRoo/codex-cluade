@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -435,6 +436,31 @@ describe("TaskManager", () => {
     assert.equal(task?.rollback?.status, "ready");
   });
 
+  it("records file snapshot diff for completed non-git tasks", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-file-snapshot-store-"));
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-task-file-snapshot-workspace-"));
+    const manager = createFileWritingManager(new TaskStore({ rootDir: storeDir }), "hello from non-git task\n", []);
+
+    const launched = await manager.run({
+      mode: "background",
+      workspace,
+      request: "Create app text outside git",
+      stages: ["implement"],
+      routing: {},
+      preferredAgent: "claude",
+      runId: "file-snapshot-task"
+    });
+
+    await waitForStatus(manager, launched.taskId ?? "", "completed");
+    const task = manager.get(launched.taskId ?? "");
+
+    assert.equal(task?.gitCheckpoint?.supported, false);
+    assert.equal(task?.gitDiff?.supported, false);
+    assert.deepEqual(task?.gitDiff?.files.map(file => `${file.status}:${file.path}`), ["added:app.txt"]);
+    assert.deepEqual(task?.resultSummary?.changedFiles, ["app.txt"]);
+    assert.equal(task?.rollback?.status, "not_available");
+  });
+
   it("rolls back a completed task when the checkpoint was clean", async () => {
     const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-rollback-store-"));
     const workspace = await createGitWorkspace("bridge-task-rollback-workspace-");
@@ -569,6 +595,65 @@ describe("TaskManager", () => {
     assert.ok(completed?.workflow?.statePath?.includes(".codex-claude/workflows/workflow-parent.json"));
     assert.equal(completed?.resultSummary?.kind, "workflow");
     assert.match(completed?.resultSummary?.summary ?? "", /2\/2 child tasks completed/);
+  });
+
+  it("does not recreate deleted workspaces when reading completed workflow tasks", async () => {
+    const storeDir = await mkdtemp(join(tmpdir(), "bridge-task-workflow-deleted-workspace-"));
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-task-workflow-workspace-"));
+    await rm(workspace, { recursive: true, force: true });
+    const store = new TaskStore({ rootDir: storeDir });
+    const now = new Date().toISOString();
+    store.save({
+      id: "deleted-workspace-child",
+      mode: "background",
+      status: "completed",
+      workspace,
+      request: "Implement child",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      runId: "deleted-workspace-child",
+      parentTaskId: "deleted-workspace-parent",
+      createdAt: now,
+      updatedAt: now,
+      result: {
+        ok: true,
+        runId: "deleted-workspace-child",
+        summary: "child done",
+        results: [{
+          ok: true,
+          runId: "deleted-workspace-child",
+          stage: "implement",
+          agent: "claude",
+          status: "completed",
+          changedFiles: [],
+          requiresCodex: false,
+          summary: "child done"
+        }]
+      }
+    });
+    store.save({
+      id: "deleted-workspace-parent",
+      kind: "workflow",
+      mode: "background",
+      status: "completed",
+      workspace,
+      request: "Implement workflow",
+      stages: ["implement"],
+      preferredAgent: "claude",
+      runId: "deleted-workspace-parent",
+      childTaskIds: ["deleted-workspace-child"],
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const manager = createManager(store);
+    assert.equal(existsSync(workspace), false);
+
+    const parent = manager.get("deleted-workspace-parent");
+
+    assert.equal(parent?.status, "completed");
+    assert.equal(parent?.workflow?.state?.phase, "completed");
+    assert.equal(existsSync(workspace), false);
   });
 
   it("surfaces shared-file risks in workflow summaries", async () => {
@@ -1090,7 +1175,7 @@ function createManager(
   return new TaskManager(coordinator, store, { concurrency, verification, workflow });
 }
 
-function createFileWritingManager(store: TaskStore, content: string): TaskManager {
+function createFileWritingManager(store: TaskStore, content: string, reportedChangedFiles = ["app.txt"]): TaskManager {
   const coordinator = new AgentCoordinator({
     providers: {
       claude: {
@@ -1103,7 +1188,7 @@ function createFileWritingManager(store: TaskStore, content: string): TaskManage
             stage: input.stage,
             agent: "claude",
             status: "completed",
-            changedFiles: ["app.txt"],
+            changedFiles: reportedChangedFiles,
             requiresCodex: false,
             summary: "Updated app text."
           };

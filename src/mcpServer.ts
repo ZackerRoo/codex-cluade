@@ -436,6 +436,34 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
   );
 
   server.registerTool(
+    "team_autonomy_run",
+    {
+      title: "Run team autonomy loop",
+      description: "Run a bounded Team Mode autonomy loop: communication rounds, coordinator ticks, task starts, merge creation, memory updates, and conflict arbitration.",
+      inputSchema: {
+        teamId: z.string().min(1).describe("Team id."),
+        cycles: z.number().int().min(1).max(10).optional().describe("Maximum autonomy cycles to run."),
+        liveAgents: z.boolean().optional().describe("When true, call live agents during each communication round."),
+        createTasks: z.boolean().optional().describe("When true, create follow-up tasks from round messages."),
+        autoStart: z.boolean().optional().describe("Whether coordinator ticks may start todo tasks."),
+        autoMerge: z.boolean().optional().describe("Whether coordinator ticks may create a merger task."),
+        maxStarts: z.number().int().min(0).optional().describe("Maximum tasks to start per coordinator tick."),
+        maxParticipants: z.number().int().min(1).optional().describe("Maximum round participants."),
+        model: z.string().optional().describe("Optional provider model override for live agent responses."),
+        effort: z.string().optional().describe("Optional reasoning effort for live agent responses."),
+        timeoutMs: z.number().int().positive().optional().describe("Timeout in milliseconds for each live agent response.")
+      },
+      annotations: {
+        title: "Run team autonomy loop",
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      }
+    },
+    async args => taskTools.teamAutonomyRunTool(args as Parameters<TaskToolSet["teamAutonomyRunTool"]>[0])
+  );
+
+  server.registerTool(
     "team_round_run",
     {
       title: "Run team round",
@@ -444,7 +472,13 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
         teamId: z.string().min(1).describe("Team id."),
         topic: z.string().optional().describe("Optional round topic. Defaults to the team goal or coordinator action."),
         participants: z.array(z.string()).optional().describe("Optional member ids to include. Defaults to all team members."),
-        maxParticipants: z.number().int().min(1).optional().describe("Maximum participants to include in this round.")
+        maxParticipants: z.number().int().min(1).optional().describe("Maximum participants to include in this round."),
+        liveAgents: z.boolean().optional().describe("When true, call each participant's configured provider for a real read-only round response."),
+        createTasks: z.boolean().optional().describe("When true, create follow-up Team Mode tasks from round messages."),
+        maxGeneratedTasks: z.number().int().min(0).optional().describe("Maximum follow-up tasks to create from this round."),
+        model: z.string().optional().describe("Optional provider model override for live agent responses."),
+        effort: z.string().optional().describe("Optional reasoning effort for live agent responses."),
+        timeoutMs: z.number().int().positive().optional().describe("Timeout in milliseconds for each live agent response.")
       },
       annotations: {
         title: "Run team round",
@@ -453,7 +487,7 @@ export function createServer(options: { taskTools?: TaskToolSet } = {}): McpServ
         openWorldHint: false
       }
     },
-    async args => taskTools.teamRoundRunTool(args)
+    async args => taskTools.teamRoundRunTool(args as Parameters<TaskToolSet["teamRoundRunTool"]>[0])
   );
 
   server.registerTool(

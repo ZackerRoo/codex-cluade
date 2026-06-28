@@ -85,6 +85,10 @@ describe("dashboard server", () => {
     assert.match(html, /Requested model/);
     assert.match(html, /workflow-verify-command/);
     assert.match(html, /workflow-max-repair-attempts/);
+    assert.match(html, /quick-start/);
+    assert.match(html, /Quick start/);
+    assert.match(html, /Understand a project/);
+    assert.match(html, /Large multi-agent task/);
     assert.match(html, /stability-panel/);
     assert.match(html, /team-panel/);
     assert.match(html, /Team Mode/);
@@ -92,6 +96,10 @@ describe("dashboard server", () => {
     assert.match(html, /team-auto-start/);
     assert.match(html, /team-auto-merge/);
     assert.match(html, /team-round-topic/);
+    assert.match(html, /team-round-live-agents/);
+    assert.match(html, /team-round-create-tasks/);
+    assert.match(html, /team-round-submit/);
+    assert.match(html, /team-selected-summary/);
     assert.match(html, /show-child-tasks/);
     assert.match(html, /Show child tasks/);
   });
@@ -112,6 +120,8 @@ describe("dashboard server", () => {
     assert.match(js, /\/api\/commands/);
     assert.match(js, /\/api\/providers/);
     assert.match(js, /Provider health/);
+    assert.match(js, /model status/);
+    assert.match(js, /modelError/);
     assert.match(js, /Language servers/);
     assert.match(js, /language-server-summary/);
     assert.match(js, /\/api\/run-command/);
@@ -143,6 +153,10 @@ describe("dashboard server", () => {
     assert.match(js, /renderTaskPreview/);
     assert.match(js, /Apply recommended setup/);
     assert.match(js, /applyRecommendedSetup/);
+    assert.match(js, /QUICK_START_EXAMPLES/);
+    assert.match(js, /applyQuickStart/);
+    assert.match(js, /setWorkflowCommand/);
+    assert.match(js, /Template applied\. Fill workspace/);
     assert.match(js, /\/api\/task-preview/);
     assert.match(js, /verifyCommand/);
     assert.match(js, /\/api\/stability-runs/);
@@ -162,6 +176,10 @@ describe("dashboard server", () => {
     assert.match(js, /Run coordinator/);
     assert.match(js, /runTeamRound/);
     assert.match(js, /Run team round/);
+    assert.match(js, /renderTeamRoundSelection/);
+    assert.match(js, /Select a team first/);
+    assert.match(js, /liveAgents/);
+    assert.match(js, /createTasks/);
   });
 
   it("serves dashboard code that preserves task detail scroll during auto-refresh", async () => {
@@ -767,20 +785,72 @@ describe("dashboard server", () => {
       const roundResponse = await fetch(`${liveBaseUrl}/api/teams/dashboard-round-team/round-run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ topic: "Align on plan, risks, and next action" })
+        body: JSON.stringify({ topic: "Align on plan, risks, and next action", createTasks: true, maxGeneratedTasks: 1 })
       });
       const round = await roundResponse.json() as {
         ok?: boolean;
-        round?: { participantCount?: number; messages?: Array<{ from?: string; body?: string }> };
-        team?: { messages?: unknown[]; coordinator?: { phase?: string } };
+        round?: { participantCount?: number; messages?: Array<{ from?: string; body?: string }>; generatedTasks?: unknown[] };
+        team?: { messages?: unknown[]; tasks?: unknown[]; coordinator?: { phase?: string } };
       };
 
       assert.equal(roundResponse.status, 200);
       assert.equal(round.ok, true);
       assert.equal(round.round?.participantCount, 3);
       assert.equal(round.round?.messages?.length, 3);
+      assert.equal(round.round?.generatedTasks?.length, 1);
       assert.equal(round.team?.messages?.length, 3);
+      assert.equal(round.team?.tasks?.length, 1);
       assert.equal(round.team?.coordinator?.phase, "running");
+    } finally {
+      await new Promise<void>(resolve => liveServer.close(() => resolve()));
+    }
+  });
+
+  it("runs Team Mode autonomy loops through the live dashboard API", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bridge-dashboard-team-autonomy-"));
+    const manager = new TaskManager(new AgentCoordinator({
+      providers: {
+        claude: new FastProvider("claude"),
+        "codex-cli": new FastProvider("codex-cli")
+      }
+    }), new TaskStore({ rootDir: join(root, "tasks") }));
+    const tools = createTaskTools({
+      taskManager: manager,
+      teamStore: new TeamStore({ rootDir: join(root, "teams") })
+    });
+    const liveServer = createDashboardServer({ taskManager: manager, taskTools: tools });
+    const liveBaseUrl = await listenTestServer(liveServer);
+    try {
+      await fetch(`${liveBaseUrl}/api/teams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          teamId: "dashboard-autonomy-team",
+          workspace: "/tmp/project",
+          goal: "Autonomously coordinate a feature",
+          members: [
+            { id: "planner", role: "planning", agent: "codex-cli" },
+            { id: "coder", role: "implementation", agent: "claude" }
+          ]
+        })
+      });
+
+      const response = await fetch(`${liveBaseUrl}/api/teams/dashboard-autonomy-team/autonomy-run`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cycles: 2, liveAgents: true, createTasks: false, autoStart: true })
+      });
+      const data = await response.json() as {
+        ok?: boolean;
+        cycles?: Array<{ roundId?: string; phase?: string }>;
+        team?: { memory?: unknown[]; members?: Array<{ id?: string; memory?: unknown[] }> };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(data.ok, true);
+      assert.ok((data.cycles?.length ?? 0) >= 1);
+      assert.ok((data.team?.memory?.length ?? 0) > 0);
+      assert.ok(data.team?.members?.some(member => member.id === "planner" && (member.memory?.length ?? 0) > 0));
     } finally {
       await new Promise<void>(resolve => liveServer.close(() => resolve()));
     }
@@ -897,6 +967,24 @@ class SlowProvider implements AgentProvider {
       changedFiles: [],
       requiresCodex: false,
       summary: "done"
+    };
+  }
+}
+
+class FastProvider implements AgentProvider {
+  constructor(readonly name: AgentName) {}
+
+  async run(input: StageInput): Promise<StageResult> {
+    const member = /Your member id: ([^\n]+)/.exec(input.request)?.[1] ?? this.name;
+    return {
+      ok: true,
+      runId: input.runId ?? "dashboard-fast-task",
+      stage: input.stage,
+      agent: this.name,
+      status: "completed",
+      changedFiles: [],
+      requiresCodex: false,
+      summary: `agent response for ${member}`
     };
   }
 }

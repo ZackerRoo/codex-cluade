@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -47,7 +47,7 @@ describe("ClaudeCodeAgent", () => {
     assert.ok(!calls[0].includes("plan"));
     const disallowedIndex = calls[0].indexOf("--disallowedTools");
     assert.notEqual(disallowedIndex, -1);
-    assert.equal(calls[0][disallowedIndex + 1], "Edit,MultiEdit,Write,NotebookEdit");
+    assert.equal(calls[0][disallowedIndex + 1], "Edit,Write,NotebookEdit");
     assert.doesNotMatch(calls[0].at(-1) ?? "", /Stage: plan/);
     assert.match(inputs[0] ?? "", /Stage: plan/);
   });
@@ -125,9 +125,53 @@ describe("ClaudeCodeAgent", () => {
 
   it("passes the bridge default Claude model when no model is requested", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
+    const settingsPath = join(workspace, "claude-settings.json");
+    await writeFile(settingsPath, JSON.stringify({ model: "opus[1m]" }), "utf8");
+    const previousModel = process.env.CODEX_CLAUDE_MODEL;
+    const previousSettingsPath = process.env.CODEX_CLAUDE_SETTINGS_PATH;
+    delete process.env.CODEX_CLAUDE_MODEL;
+    process.env.CODEX_CLAUDE_SETTINGS_PATH = settingsPath;
+    const calls: string[][] = [];
+    try {
+      const agent = new ClaudeCodeAgent({
+        claudePath: "claude",
+        exec: async (_command: string, args: string[]) => {
+          calls.push(args);
+          return {
+            code: 0,
+            stdout: JSON.stringify({ result: "implemented" }),
+            stderr: "",
+            timedOut: false
+          };
+        },
+        getChangedFiles: async () => []
+      });
+
+      await agent.run({
+        stage: "implement",
+        agent: "claude",
+        workspace,
+        request: "Add login cache",
+        runId: "2026-05-16-default-model"
+      });
+
+      const modelIndex = calls[0].indexOf("--model");
+      assert.notEqual(modelIndex, -1);
+      assert.equal(calls[0][modelIndex + 1], "opus[1m]");
+    } finally {
+      if (previousModel === undefined) delete process.env.CODEX_CLAUDE_MODEL;
+      else process.env.CODEX_CLAUDE_MODEL = previousModel;
+      if (previousSettingsPath === undefined) delete process.env.CODEX_CLAUDE_SETTINGS_PATH;
+      else process.env.CODEX_CLAUDE_SETTINGS_PATH = previousSettingsPath;
+    }
+  });
+
+  it("passes configured default Claude model when provided", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
     const calls: string[][] = [];
     const agent = new ClaudeCodeAgent({
       claudePath: "claude",
+      defaultModel: "claude-opus-4-8",
       exec: async (_command: string, args: string[]) => {
         calls.push(args);
         return {
@@ -145,19 +189,20 @@ describe("ClaudeCodeAgent", () => {
       agent: "claude",
       workspace,
       request: "Add login cache",
-      runId: "2026-05-16-default-model"
+      runId: "2026-05-16-configured-model"
     });
 
     const modelIndex = calls[0].indexOf("--model");
     assert.notEqual(modelIndex, -1);
-    assert.equal(calls[0][modelIndex + 1], "pa/claude-opus-4-7");
+    assert.equal(calls[0][modelIndex + 1], "claude-opus-4-8");
   });
 
-  it("lets explicit model override the bridge default Claude model", async () => {
+  it("lets explicit model override the configured default Claude model", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "bridge-test-"));
     const calls: string[][] = [];
     const agent = new ClaudeCodeAgent({
       claudePath: "claude",
+      defaultModel: "claude-opus-4-8",
       exec: async (_command: string, args: string[]) => {
         calls.push(args);
         return {
